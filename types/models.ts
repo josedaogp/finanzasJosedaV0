@@ -49,7 +49,7 @@ export interface AssetTransactionType {
 }
 
 // === TABLAS PRINCIPALES ===
-
+//en uso
 export interface Wallet {
   id: string
   user_id: string
