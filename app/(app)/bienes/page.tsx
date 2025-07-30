@@ -17,126 +17,161 @@ import {
 } from "@/components/ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import { Plus, Edit, Trash2, Building2, CreditCard, Banknote, TrendingUp } from "lucide-react"
+import { Plus, Edit, Trash2, Building2 } from "lucide-react"
 
-interface Asset {
-  id: string
+import { Asset } from "@/types/models"
+import { fetchAssets, createAsset, updateAsset, deleteAsset } from "@/services/assetService"
+import { useRequireAuth } from "@/hooks/useRequireAuth"
+
+// Opcional: puedes tener este tipo si tienes la tabla asset_types
+interface AssetType {
+  id: number
   name: string
-  type: "cuenta_bancaria" | "efectivo" | "inversion" | "propiedad" | "otro"
-  currentBalance: number
+  icon?: React.ElementType // Si luego quieres poner iconos por tipo, aquí
 }
 
-const assetTypes = [
-  { value: "cuenta_bancaria", label: "Cuenta Bancaria", icon: CreditCard },
-  { value: "efectivo", label: "Efectivo", icon: Banknote },
-  { value: "inversion", label: "Inversión", icon: TrendingUp },
-  { value: "propiedad", label: "Propiedad", icon: Building2 },
-  { value: "otro", label: "Otro", icon: Building2 },
-]
-
 export default function BienesPage() {
+  const session = useRequireAuth()
+  if (!session) return null
+
   const [assets, setAssets] = useState<Asset[]>([])
+  const [assetTypes, setAssetTypes] = useState<AssetType[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingAsset, setEditingAsset] = useState<Asset | null>(null)
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<Partial<Asset>>({
     name: "",
-    type: "cuenta_bancaria" as Asset["type"],
-    currentBalance: 0,
+    asset_type_id: undefined,
+    current_balance: 0,
   })
 
+  // Carga inicial de assets y assetTypes
   useEffect(() => {
-    loadData()
-  }, [])
-
-  useEffect(() => {
-    const handleIngestaCompleted = () => {
-      loadData() // Recargar datos
+    async function loadAll() {
+      setLoading(true)
+      setError(null)
+      try {
+        // Opcional: carga tipos de asset de la BBDD (asset_types)
+        const typesData = await fetchAssetTypes() // si tienes el service
+        setAssetTypes(typesData)
+        // Carga los bienes del usuario
+        const assetsData = await fetchAssets(session!.user.id)
+        setAssets(assetsData)
+      } catch (err: any) {
+        setError(err.message || "Error al cargar los bienes")
+      } finally {
+        setLoading(false)
+      }
     }
+    loadAll()
+  }, [session.user.id])
 
-    window.addEventListener("ingestaCompleted", handleIngestaCompleted)
-    return () => window.removeEventListener("ingestaCompleted", handleIngestaCompleted)
-  }, [])
-
-  const loadData = () => {
-    const savedAssets = localStorage.getItem("assets")
-
-    if (savedAssets) {
-      setAssets(JSON.parse(savedAssets))
-    } else {
-      // Crear algunos bienes por defecto
-      const defaultAssets: Asset[] = [
-        { id: "1", name: "Cuenta Corriente", type: "cuenta_bancaria", currentBalance: 2500 },
-        { id: "2", name: "Cuenta Ahorro", type: "cuenta_bancaria", currentBalance: 5000 },
-        { id: "3", name: "Efectivo", type: "efectivo", currentBalance: 200 },
-      ]
-      setAssets(defaultAssets)
-      localStorage.setItem("assets", JSON.stringify(defaultAssets))
-    }
+  // Opcional: service para tipos de asset (asset_types)
+  async function fetchAssetTypes(): Promise<AssetType[]> {
+    // Si tienes un service global, usa ese
+    // Si no, aquí te pongo la query básica:
+    const { createClient } = await import('@supabase/supabase-js')
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    )
+    const { data, error } = await supabase
+      .from("asset_types")
+      .select("*")
+      .order("id")
+    if (error) throw new Error(error.message)
+    return data as AssetType[]
   }
 
-  const saveAssets = (newAssets: Asset[]) => {
-    localStorage.setItem("assets", JSON.stringify(newAssets))
-    setAssets(newAssets)
+  // Helpers
+  const getTypeLabel = (type_id: number | null | undefined) => {
+    const type = assetTypes.find((t) => t.id === type_id)
+    return type ? type.name : "-"
   }
 
+  const getTotalBalance = () => {
+    return assets.reduce((sum, asset) => sum + Number(asset.current_balance), 0)
+  }
+
+  // Dialog open/close helpers
   const openDialog = (asset?: Asset) => {
     if (asset) {
       setEditingAsset(asset)
       setFormData({
         name: asset.name,
-        type: asset.type,
-        currentBalance: asset.currentBalance,
+        asset_type_id: asset.asset_type_id ?? undefined,
+        current_balance: Number(asset.current_balance) ?? 0,
       })
     } else {
       setEditingAsset(null)
       setFormData({
         name: "",
-        type: "cuenta_bancaria",
-        currentBalance: 0,
+        asset_type_id: assetTypes[0]?.id ?? undefined,
+        current_balance: 0,
       })
     }
     setIsDialogOpen(true)
   }
 
-  const handleSave = () => {
-    if (!formData.name.trim()) {
+  // Guardar asset
+  const handleSave = async () => {
+    if (!formData.name?.trim()) {
       alert("El nombre es obligatorio")
       return
     }
-
-    const assetData: Asset = {
-      id: editingAsset?.id || Date.now().toString(),
-      name: formData.name.trim(),
-      type: formData.type,
-      currentBalance: formData.currentBalance,
+    if (!formData.asset_type_id) {
+      alert("Selecciona el tipo de bien")
+      return
     }
-
-    let newAssets: Asset[]
-    if (editingAsset) {
-      newAssets = assets.map((asset) => (asset.id === editingAsset.id ? assetData : asset))
-    } else {
-      newAssets = [...assets, assetData]
+    setLoading(true)
+    setError(null)
+    try {
+      if (editingAsset) {
+        const updated = await updateAsset(editingAsset.id, {
+          name: formData.name.trim(),
+          asset_type_id: Number(formData.asset_type_id),
+          current_balance: Number(formData.current_balance),
+        })
+        setAssets((prev) =>
+          prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a))
+        )
+      } else {
+        const payload = {
+          name: formData.name!.trim(),
+          asset_type_id: Number(formData.asset_type_id),
+          current_balance: Number(formData.current_balance),
+          user_id: session.user.id,
+        }
+        await createAsset(payload)
+        // Recargar lista entera por seguridad
+        const assetsData = await fetchAssets(session.user.id)
+        setAssets(assetsData)
+      }
+      setIsDialogOpen(false)
+    } catch (err: any) {
+      setError(err.message || "Error al guardar el bien")
+    } finally {
+      setLoading(false)
     }
-
-    saveAssets(newAssets)
-    setIsDialogOpen(false)
   }
 
-  const handleDelete = (assetId: string) => {
-    if (confirm("¿Estás seguro de que quieres eliminar este bien?")) {
-      const newAssets = assets.filter((asset) => asset.id !== assetId)
-      saveAssets(newAssets)
+  // Eliminar asset
+  const handleDelete = async (assetId: string) => {
+    if (!window.confirm("¿Estás seguro de que quieres eliminar este bien?")) return
+    setLoading(true)
+    setError(null)
+    try {
+      await deleteAsset(assetId)
+      setAssets((prev) => prev.filter((a) => a.id !== assetId))
+    } catch (err: any) {
+      setError(err.message || "Error al eliminar el bien")
+    } finally {
+      setLoading(false)
     }
   }
 
-  const getTypeInfo = (type: string) => {
-    return assetTypes.find((t) => t.value === type) || assetTypes[0]
-  }
-
-  const getTotalBalance = () => {
-    return assets.reduce((sum, asset) => sum + asset.currentBalance, 0)
-  }
-
+  // Render
   return (
     <div className="container mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -163,59 +198,62 @@ export default function BienesPage() {
                 <Label htmlFor="name">Nombre</Label>
                 <Input
                   id="name"
-                  value={formData.name}
+                  value={formData.name || ""}
                   onChange={(e) => setFormData((prev) => ({ ...prev, name: e.target.value }))}
                   placeholder="Nombre del bien"
                 />
               </div>
-
               <div className="space-y-2">
-                <Label htmlFor="type">Tipo de bien</Label>
+                <Label htmlFor="asset_type_id">Tipo de bien</Label>
                 <Select
-                  value={formData.type}
-                  onValueChange={(value: Asset["type"]) => setFormData((prev) => ({ ...prev, type: value }))}
+                  value={formData.asset_type_id ? formData.asset_type_id.toString() : ""}
+                  onValueChange={(value) =>
+                    setFormData((prev) => ({
+                      ...prev,
+                      asset_type_id: Number(value)
+                    }))
+                  }
                 >
                   <SelectTrigger>
-                    <SelectValue />
+                    <SelectValue placeholder="Seleccionar tipo" />
                   </SelectTrigger>
                   <SelectContent>
                     {assetTypes.map((type) => (
-                      <SelectItem key={type.value} value={type.value}>
-                        <div className="flex items-center">
-                          <type.icon className="mr-2 h-4 w-4" />
-                          {type.label}
-                        </div>
+                      <SelectItem key={type.id} value={type.id.toString()}>
+                        {type.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
-
               <div className="space-y-2">
-                <Label htmlFor="currentBalance">Saldo actual</Label>
+                <Label htmlFor="current_balance">Saldo actual</Label>
                 <Input
-                  id="currentBalance"
+                  id="current_balance"
                   type="number"
                   min="0"
                   step="0.01"
-                  value={formData.currentBalance}
+                  value={formData.current_balance ?? 0}
                   onChange={(e) =>
-                    setFormData((prev) => ({ ...prev, currentBalance: Number.parseFloat(e.target.value) || 0 }))
+                    setFormData((prev) => ({
+                      ...prev,
+                      current_balance: Number.parseFloat(e.target.value) || 0,
+                    }))
                   }
                   placeholder="0.00"
                 />
               </div>
             </div>
             <DialogFooter>
-              <Button type="submit" onClick={handleSave}>
+              <Button type="submit" onClick={handleSave} disabled={loading}>
                 {editingAsset ? "Actualizar" : "Crear"}
               </Button>
             </DialogFooter>
+            {error && <div className="text-red-500 text-sm mt-2">{error}</div>}
           </DialogContent>
         </Dialog>
       </div>
 
-      {/* Resumen total */}
       <Card>
         <CardHeader>
           <CardTitle>Resumen Total</CardTitle>
@@ -226,41 +264,6 @@ export default function BienesPage() {
         </CardContent>
       </Card>
 
-      {/* Tarjetas de bienes */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {assets.map((asset) => {
-          const typeInfo = getTypeInfo(asset.type)
-          const IconComponent = typeInfo.icon
-
-          return (
-            <Card key={asset.id}>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-lg font-medium">{asset.name}</CardTitle>
-                <IconComponent className="h-5 w-5 text-muted-foreground" />
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <div className="text-2xl font-bold">€{asset.currentBalance.toFixed(2)}</div>
-                  <Badge variant="outline" className="mt-2">
-                    {typeInfo.label}
-                  </Badge>
-                </div>
-
-                <div className="flex justify-end space-x-2">
-                  <Button variant="outline" size="sm" onClick={() => openDialog(asset)}>
-                    <Edit className="h-4 w-4" />
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => handleDelete(asset.id)}>
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )
-        })}
-      </div>
-
-      {/* Tabla detallada */}
       <Card>
         <CardHeader>
           <CardTitle>Detalle de Bienes</CardTitle>
@@ -277,33 +280,25 @@ export default function BienesPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {assets.map((asset) => {
-                const typeInfo = getTypeInfo(asset.type)
-                const IconComponent = typeInfo.icon
-
-                return (
-                  <TableRow key={asset.id}>
-                    <TableCell className="font-medium">{asset.name}</TableCell>
-                    <TableCell>
-                      <div className="flex items-center">
-                        <IconComponent className="mr-2 h-4 w-4" />
-                        <Badge variant="outline">{typeInfo.label}</Badge>
-                      </div>
-                    </TableCell>
-                    <TableCell>€{asset.currentBalance.toFixed(2)}</TableCell>
-                    <TableCell>
-                      <div className="flex space-x-2">
-                        <Button variant="outline" size="sm" onClick={() => openDialog(asset)}>
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => handleDelete(asset.id)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
+              {assets.map((asset) => (
+                <TableRow key={asset.id}>
+                  <TableCell className="font-medium">{asset.name}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{getTypeLabel(asset.asset_type_id)}</Badge>
+                  </TableCell>
+                  <TableCell>€{Number(asset.current_balance).toFixed(2)}</TableCell>
+                  <TableCell>
+                    <div className="flex space-x-2">
+                      <Button variant="outline" size="sm" onClick={() => openDialog(asset)}>
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => handleDelete(asset.id)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
             </TableBody>
           </Table>
 
@@ -320,6 +315,7 @@ export default function BienesPage() {
           )}
         </CardContent>
       </Card>
+      {error && <div className="text-red-500 text-center">{error}</div>}
     </div>
   )
 }
