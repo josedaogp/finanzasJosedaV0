@@ -1,10 +1,12 @@
 "use client"
 
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Home, Calendar, PieChart, Wallet, Tag, Building2, TrendingUp } from "lucide-react"
+import { useSession, useSupabaseClient } from "@supabase/auth-helpers-react"
+import { useState } from "react"
 
 const navigation = [
   {
@@ -61,9 +63,21 @@ const navigation = [
 
 export function Sidebar() {
   const pathname = usePathname()
+  const session = useSession()
+  const supabase = useSupabaseClient()
+  const router = useRouter()
+  const [loading, setLoading] = useState(false)
+
+  const handleLogout = async () => {
+    setLoading(true)
+    await supabase.auth.signOut()
+    setLoading(false)
+    router.push("/login") // <--- Redirección tras logout
+  }
 
   return (
-    <div className="flex flex-col w-64 bg-card border-r">
+    <div className="flex flex-col w-64 bg-card border-r h-screen">
+      {/* Cabecera/logo */}
       <div className="p-6">
         <div className="flex items-center gap-2">
           <PieChart className="h-8 w-8 text-primary" />
@@ -71,6 +85,7 @@ export function Sidebar() {
         </div>
       </div>
 
+      {/* Navegación */}
       <nav className="flex-1 px-4 space-y-2">
         {navigation.map((item) => {
           const isActive = pathname === item.href
@@ -87,6 +102,24 @@ export function Sidebar() {
           )
         })}
       </nav>
+
+      {/* Usuario y logout */}
+      {session && (
+        <div className="px-4 py-6 border-t flex flex-col gap-2">
+          <span className="text-xs text-muted-foreground truncate" title={session.user.email}>
+            {session.user.email}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full"
+            onClick={handleLogout}
+            disabled={loading}
+          >
+            {loading ? "Cerrando sesión..." : "Cerrar sesión"}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

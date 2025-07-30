@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
+import { AuthWidget } from "@/components/AuthWidget"
 import {
   Dialog,
   DialogContent,
@@ -25,12 +26,19 @@ import { fetchWallets } from "@/services/walletService"
 import { fetchCategoryTypes } from "@/services/categoryTypesService"
 import { CategoryType, Wallet } from "@/types/models"
 import { Category, CategoryWithType } from "@/types/category"
+import { useSession } from "@supabase/auth-helpers-react"
+import { useRouter } from "next/dist/client/components/navigation"
+import { useRequireAuth } from "@/hooks/useRequireAuth"
 
 // ===========================
 // Página de gestión de categorías de gasto
 // ===========================
 
 export default function CategoriasPage() {
+
+  const session = useRequireAuth()
+  if (!session) return null
+    
   // Estados principales
   const [categories, setCategories] = useState<CategoryWithType[]>([])
   const [wallets, setWallets] = useState<Wallet[]>([])
