@@ -8,55 +8,76 @@ import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Calendar, TrendingUp, TrendingDown, DollarSign } from "lucide-react"
 import Link from "next/link"
+import { getCategories } from "@/services/categoryService"
+import { getMonthlyIngestion } from "@/services/ingestionService"
+import { Category, EnrichedCategory, EnrichedMonthlyIngestion, MonthlyIngestion } from "@/types/models"
 
-interface Category {
-  id: string
-  name: string
-  type: "gasto" | "gasto_acumulativo" | "gasto_mixto" | "gasto_acumulativo_opcional"
-  monthlyBudget: number
-  annualBudget?: number
-  active: boolean
-  walletId?: string
-}
+// TO-DO: BORRAR ESTO CUANDO NO SEA NECESARIO
+// interface Category {
+//   id: string
+//   name: string
+//   type: "gasto" | "gasto_acumulativo" | "gasto_mixto" | "gasto_acumulativo_opcional"
+//   monthlyBudget: number
+//   annualBudget?: number
+//   active: boolean
+//   walletId?: string
+// }
 
-interface MonthlyIngestion {
-  id: string
-  month: number
-  year: number
-  date: string
-  expenses: { [categoryId: string]: number }
-  incomes: Array<{
-    id: string
-    amount: number
-    assetId: string
-    description?: string
-  }>
-  walletAdjustments: { [walletId: string]: number }
-  surplusDistribution: { [walletId: string]: number }
-}
+// interface MonthlyIngestion {
+//   id: string
+//   month: number
+//   year: number
+//   date: string
+//   expenses: { [categoryId: string]: number }
+//   incomes: Array<{
+//     id: string
+//     amount: number
+//     assetId: string
+//     description?: string
+//   }>
+//   walletAdjustments: { [walletId: string]: number }
+//   surplusDistribution: { [walletId: string]: number }
+// }
 
 export default function HomePage() {
   const [selectedMonth, setSelectedMonth] = useState<string>("")
-  const [monthlyData, setMonthlyData] = useState<MonthlyIngestion[]>([])
-  const [categories, setCategories] = useState<Category[]>([])
+  const [monthlyData, setMonthlyData] = useState<EnrichedMonthlyIngestion[]>([])
+  const [categories, setCategories] = useState<EnrichedCategory[]>([])
 
+  // useEffect(() => {
+  //   // Cargar datos del localStorage
+  //   const savedData = localStorage.getItem("monthlyIngestions")
+  //   const savedCategories = localStorage.getItem("categories")
+
+  //   if (savedData) {
+  //     setMonthlyData(JSON.parse(savedData))
+  //   }
+  //   if (savedCategories) {
+  //     setCategories(JSON.parse(savedCategories))
+  //   }
+
+  //   // Establecer mes actual por defecto
+  //   const now = new Date()
+  //   setSelectedMonth(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`)
+  // }, [])
   useEffect(() => {
-    // Cargar datos del localStorage
-    const savedData = localStorage.getItem("monthlyIngestions")
-    const savedCategories = localStorage.getItem("categories")
+    const load = async () => {
+      const cats = await getCategories()
+      setCategories(cats)
 
-    if (savedData) {
-      setMonthlyData(JSON.parse(savedData))
-    }
-    if (savedCategories) {
-      setCategories(JSON.parse(savedCategories))
+      const now = new Date()
+      const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`
+      setSelectedMonth(monthKey)
+
+      const data = await getMonthlyIngestion(now.getFullYear(), now.getMonth() + 1)
+      if (data) {
+        setMonthlyData([data]) // o guarda más si cargas múltiples meses
+      }
     }
 
-    // Establecer mes actual por defecto
-    const now = new Date()
-    setSelectedMonth(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`)
+    load()
   }, [])
-
+  
   useEffect(() => {
     const handleIngestaCompleted = () => {
       // Recargar datos del localStorage
@@ -75,21 +96,30 @@ export default function HomePage() {
     return () => window.removeEventListener("ingestaCompleted", handleIngestaCompleted)
   }, [])
 
-  const getMonthData = (monthKey: string) => {
+  // const getMonthData = (monthKey: string) => {
+  //   return monthlyData.find((data) => {
+  //     const [year, month] = monthKey.split("-")
+  //     return data.year === Number.parseInt(year) && data.month === Number.parseInt(month)
+  //   })
+  // }
+  const getMonthData = (monthKey: string): EnrichedMonthlyIngestion | undefined => {
     return monthlyData.find((data) => {
       const [year, month] = monthKey.split("-")
       return data.year === Number.parseInt(year) && data.month === Number.parseInt(month)
     })
   }
 
-  const calculateCategoryStats = (monthData: MonthlyIngestion | undefined) => {
+  const calculateCategoryStats = (monthData: EnrichedMonthlyIngestion | undefined) => {
     if (!monthData) return []
 
     return categories
       .filter((cat) => cat.active)
       .map((category) => {
-        const spent = monthData.expenses[category.id] || 0
-        const budget = category.monthlyBudget
+        const spent = monthData.expenses
+          .filter((exp) => exp.category_id === category.id)
+          .reduce((sum, exp) => sum + exp.amount, 0)
+
+        const budget = category.monthly_budget
         const difference = budget - spent
         const percentage = budget > 0 ? (spent / budget) * 100 : 0
 
@@ -102,18 +132,20 @@ export default function HomePage() {
           status: spent > budget ? "excess" : spent === budget ? "exact" : "under",
         }
       })
-  }
+}
 
-  const calculateTotals = (monthData: MonthlyIngestion | undefined) => {
+
+  const calculateTotals = (monthData: EnrichedMonthlyIngestion | undefined) => {
     if (!monthData) return { totalBudget: 0, totalSpent: 0, totalIncome: 0, surplus: 0 }
 
-    const totalBudget = categories.filter((cat) => cat.active).reduce((sum, cat) => sum + cat.monthlyBudget, 0)
-    const totalSpent = Object.values(monthData.expenses).reduce((sum, amount) => sum + amount, 0)
+    const totalBudget = categories.filter((cat) => cat.active).reduce((sum, cat) => sum + cat.monthly_budget, 0)
+    const totalSpent = monthData.expenses.reduce((sum, exp) => sum + exp.amount, 0)
     const totalIncome = monthData.incomes.reduce((sum, income) => sum + income.amount, 0)
     const surplus = totalIncome - totalSpent
 
     return { totalBudget, totalSpent, totalIncome, surplus }
-  }
+}
+
 
   const monthData = getMonthData(selectedMonth)
   const categoryStats = calculateCategoryStats(monthData)
@@ -216,7 +248,7 @@ export default function HomePage() {
                             stat.status === "excess" ? "destructive" : stat.status === "exact" ? "default" : "secondary"
                           }
                         >
-                          {stat.category.type.replace("_", " ")}
+                          {stat.category.category_types?.name.replace("_", " ")}
                         </Badge>
                       </div>
                       <div className="text-right">
@@ -251,7 +283,7 @@ export default function HomePage() {
                       <div className="font-medium">€{income.amount.toFixed(2)}</div>
                       {income.description && <div className="text-sm text-muted-foreground">{income.description}</div>}
                     </div>
-                    <Badge variant="outline">Bien: {income.assetId}</Badge>
+                    <Badge variant="outline">Bien: {income.asset_id}</Badge>
                   </div>
                 ))}
               </div>
