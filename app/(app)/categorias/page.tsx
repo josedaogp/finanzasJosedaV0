@@ -26,8 +26,6 @@ import { fetchWallets } from "@/services/walletService"
 import { fetchCategoryTypes } from "@/services/categoryTypesService"
 import { CategoryType, Wallet } from "@/types/models"
 import { Category, CategoryWithType } from "@/types/category"
-import { useSession } from "@supabase/auth-helpers-react"
-import { useRouter } from "next/dist/client/components/navigation"
 import { useRequireAuth } from "@/hooks/useRequireAuth"
 
 // ===========================
@@ -153,15 +151,18 @@ export default function CategoriasPage() {
         )
       } else {
         const payload = {
-            name: formData.name!.trim(),
-            category_type_id: formData.category_type_id!,
-            monthly_budget: Number(formData.monthly_budget),
-            annual_budget: formData.annual_budget !== undefined && formData.annual_budget !== null
-                ? Number(formData.annual_budget)
-                : null,
-            active: formData.active ?? true,
-            wallet_id: formData.wallet_id ?? null,
+          name: formData.name!.trim(),
+          category_type_id: formData.category_type_id!,
+          monthly_budget: Number(formData.monthly_budget),
+          annual_budget:
+            formData.annual_budget !== undefined && formData.annual_budget !== null
+              ? Number(formData.annual_budget)
+              : null,
+          active: formData.active ?? true,
+          wallet_id: formData.wallet_id ?? null,
+          user_id: session.user.id, // <-- AÑADE ESTO SIEMPRE
         }
+
         await createCategory(payload)
  
         // Recarga la lista para incluir la relación con tipos (más robusto)

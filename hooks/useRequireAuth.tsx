@@ -1,3 +1,4 @@
+// /hooks/useRequireAuth.ts
 import { useSession } from "@supabase/auth-helpers-react"
 import { useRouter } from "next/navigation"
 import { useEffect } from "react"
@@ -12,15 +13,8 @@ export function useRequireAuth() {
     }
   }, [session, router])
 
-  if (session === undefined) {
-    return (
-      <div className="flex justify-center items-center h-screen">
-        <span className="text-muted-foreground text-lg">Cargando...</span>
-      </div>
-    )
-  }
-
+  if (session === undefined) return null
   if (session === null) return null
 
-  return session
+  return session // <-- esto es la sesión con el user, si todo está bien
 }
