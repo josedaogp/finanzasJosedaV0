@@ -19,7 +19,7 @@ const navigation = [
   },
   {
     name: "Histórico",
-    href: "/",
+    href: "/historico",
     icon: Home,
   },
   {
