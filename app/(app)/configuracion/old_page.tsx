@@ -18,165 +18,140 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
-import { useRequireAuth } from "@/hooks/useRequireAuth"
-import { fetchWallets } from "@/services/walletService"
-import {
-  fetchDistributionRules,
-  upsertDistributionRule,
-  deleteDistributionRule,
-} from "@/services/distributionRulesService"
-import { DistributionRule, Wallet, DistributionRuleType } from "@/types/models"
+
+interface Wallet {
+  id: string
+  name: string
+  currentBalance: number
+  targetBalance?: number
+}
+
+interface DistributionRule {
+  walletId: string
+  type: "percentage" | "fixed"
+  value: number
+  priority: number
+}
 
 export default function ConfiguracionPage() {
-    const session = useRequireAuth()
-    if (!session) return null
-  const userId = session?.user?.id
-
   const [wallets, setWallets] = useState<Wallet[]>([])
   const [distributionRules, setDistributionRules] = useState<DistributionRule[]>([])
   const [testAmount, setTestAmount] = useState<number>(1000)
   const [isAddWalletDialogOpen, setIsAddWalletDialogOpen] = useState(false)
   const [selectedWalletToAdd, setSelectedWalletToAdd] = useState<string>("")
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!userId) return
     loadData()
-    // eslint-disable-next-line
-  }, [userId])
+  }, [])
 
-  async function loadData() {
-    try {
-      setError(null)
-      const [walletsData, rulesData] = await Promise.all([
-        fetchWallets(userId),
-        fetchDistributionRules(userId),
-      ])
-      setWallets(walletsData)
-      setDistributionRules(rulesData)
-    } catch (err: any) {
-      setError(err.message)
+  useEffect(() => {
+    const handleIngestaCompleted = () => {
+      loadData() // Recargar datos
+    }
+
+    window.addEventListener("ingestaCompleted", handleIngestaCompleted)
+    return () => window.removeEventListener("ingestaCompleted", handleIngestaCompleted)
+  }, [])
+
+  const loadData = () => {
+    const savedWallets = localStorage.getItem("wallets")
+    const savedDistribution = localStorage.getItem("distributionRules")
+
+    if (savedWallets) {
+      setWallets(JSON.parse(savedWallets))
+    }
+
+    if (savedDistribution) {
+      setDistributionRules(JSON.parse(savedDistribution))
+    } else {
+      // Crear reglas por defecto
+      const walletsData = savedWallets ? JSON.parse(savedWallets) : []
+      const defaultRules: DistributionRule[] = walletsData.map((wallet: Wallet, index: number) => ({
+        walletId: wallet.id,
+        type: "percentage" as const,
+        value: walletsData.length > 0 ? Math.floor(100 / walletsData.length) : 0,
+        priority: index + 1,
+      }))
+      setDistributionRules(defaultRules)
     }
   }
 
   const updateRule = (walletId: string, field: keyof DistributionRule, value: any) => {
     setDistributionRules((prev) =>
-      prev.map((rule) => (rule.wallet_id === walletId ? { ...rule, [field]: value } : rule))
+      prev.map((rule) => (rule.walletId === walletId ? { ...rule, [field]: value } : rule)),
     )
   }
 
-  const addRule = async () => {
+  const addRule = () => {
     if (!selectedWalletToAdd) {
       alert("Selecciona un monedero")
       return
     }
-    const newRule = {
-      user_id: userId,
-      wallet_id: selectedWalletToAdd,
-      type: "percentage" as DistributionRuleType,
+
+    const newRule: DistributionRule = {
+      walletId: selectedWalletToAdd,
+      type: "percentage",
       value: 0,
-      priority: (distributionRules.length || 0) + 1,
+      priority: distributionRules.length + 1,
     }
-    try {
-      setSaving(true)
-      await upsertDistributionRule(newRule)
-      setSelectedWalletToAdd("")
-      setIsAddWalletDialogOpen(false)
-      await loadData()
-    } catch (err: any) {
-      setError(err.message)
-    } finally {
-      setSaving(false)
-    }
+    setDistributionRules([...distributionRules, newRule])
+    setSelectedWalletToAdd("")
+    setIsAddWalletDialogOpen(false)
   }
 
-  const removeRule = async (walletId: string) => {
-    try {
-      setSaving(true)
-      await deleteDistributionRule(userId, walletId)
-      await loadData()
-    } catch (err: any) {
-      setError(err.message)
-    } finally {
-      setSaving(false)
-    }
+  const removeRule = (walletId: string) => {
+    setDistributionRules((prev) => prev.filter((rule) => rule.walletId !== walletId))
   }
 
-  const saveAllRules = async () => {
-    const validation = getDistributionValidation()
-    if (!validation.isValid) {
-      alert(validation.message)
-      return
-    }
-    try {
-      setSaving(true)
-      await Promise.all(
-        distributionRules.map((rule) =>
-          upsertDistributionRule({
-            user_id: userId,
-            wallet_id: rule.wallet_id,
-            type: rule.type,
-            value: rule.value,
-            priority: rule.priority,
-          })
-        )
-      )
-      alert("Configuración guardada correctamente")
-      await loadData()
-    } catch (err: any) {
-      setError(err.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  // Helpers de cálculo
   const calculateDistribution = (amount: number) => {
     const sortedRules = [...distributionRules].sort((a, b) => a.priority - b.priority)
-    const distribution: { [wallet_id: string]: number } = {}
+    const distribution: { [walletId: string]: number } = {}
     let remainingAmount = amount
 
-    // Fijos primero
+    // Primero aplicar cantidades fijas
     sortedRules
       .filter((rule) => rule.type === "fixed")
       .forEach((rule) => {
-        const assignedAmount = Math.min(Number(rule.value), remainingAmount)
-        distribution[rule.wallet_id] = assignedAmount
+        const assignedAmount = Math.min(rule.value, remainingAmount)
+        distribution[rule.walletId] = assignedAmount
         remainingAmount -= assignedAmount
       })
 
-    // Porcentajes sobre el restante
+    // Luego aplicar porcentajes sobre el monto restante
     const percentageRules = sortedRules.filter((rule) => rule.type === "percentage")
-    const totalPercentage = percentageRules.reduce((sum, rule) => sum + Number(rule.value), 0)
+    const totalPercentage = percentageRules.reduce((sum, rule) => sum + rule.value, 0)
+
     if (totalPercentage > 0 && remainingAmount > 0) {
       percentageRules.forEach((rule) => {
         const assignedAmount = (remainingAmount * rule.value) / totalPercentage
-        distribution[rule.wallet_id] = (distribution[rule.wallet_id] || 0) + assignedAmount
+        distribution[rule.walletId] = (distribution[rule.walletId] || 0) + assignedAmount
       })
     }
+
     return distribution
   }
 
   const getTotalPercentage = () => {
-    return distributionRules
-      .filter((rule) => rule.type === "percentage")
-      .reduce((sum, rule) => sum + Number(rule.value), 0)
+    return distributionRules.filter((rule) => rule.type === "percentage").reduce((sum, rule) => sum + rule.value, 0)
   }
+
   const getTotalFixed = () => {
-    return distributionRules
-      .filter((rule) => rule.type === "fixed")
-      .reduce((sum, rule) => sum + Number(rule.value), 0)
+    return distributionRules.filter((rule) => rule.type === "fixed").reduce((sum, rule) => sum + rule.value, 0)
   }
 
   const getDistributionValidation = () => {
-    const activeRules = distributionRules.filter((rule) => Number(rule.value) > 0)
-    if (activeRules.length === 0) return { isValid: true, message: "" }
+    const activeRules = distributionRules.filter((rule) => rule.value > 0)
+    if (activeRules.length === 0) {
+      return { isValid: true, message: "" }
+    }
+
     const totalPercentage = activeRules
       .filter((rule) => rule.type === "percentage")
-      .reduce((sum, rule) => sum + Number(rule.value), 0)
-    const hasFixed = activeRules.some((rule) => rule.type === "fixed")
-    if (hasFixed) {
+      .reduce((sum, rule) => sum + rule.value, 0)
+
+    const hasFixedRules = activeRules.some((rule) => rule.type === "fixed")
+
+    if (hasFixedRules) {
       return {
         isValid: totalPercentage <= 100,
         message:
@@ -185,6 +160,7 @@ export default function ConfiguracionPage() {
             : "",
       }
     }
+
     const difference = Math.abs(totalPercentage - 100)
     if (difference > 0.01) {
       return {
@@ -192,10 +168,32 @@ export default function ConfiguracionPage() {
         message: `La distribución debe sumar exactamente 100%. Actualmente suma ${totalPercentage.toFixed(1)}% (${totalPercentage > 100 ? "sobran" : "faltan"} ${Math.abs(totalPercentage - 100).toFixed(1)}%)`,
       }
     }
+
     return { isValid: true, message: "" }
   }
 
-  // Simulación y validaciones
+  const saveConfiguration = () => {
+    const validation = getDistributionValidation()
+    if (!validation.isValid) {
+      alert(validation.message)
+      return
+    }
+
+    localStorage.setItem("distributionRules", JSON.stringify(distributionRules))
+
+    // También actualizar el formato legacy para compatibilidad
+    const legacyDistribution: { [walletId: string]: number } = {}
+    const testDistribution = calculateDistribution(100) // Base 100 para porcentajes
+
+    Object.entries(testDistribution).forEach(([walletId, amount]) => {
+      legacyDistribution[walletId] = (amount / 100) * 100 // Convertir a porcentaje
+    })
+
+    localStorage.setItem("surplusDistribution", JSON.stringify(legacyDistribution))
+
+    alert("Configuración guardada correctamente")
+  }
+
   const testDistribution = calculateDistribution(testAmount)
   const totalPercentage = getTotalPercentage()
   const totalFixed = getTotalFixed()
@@ -208,20 +206,38 @@ export default function ConfiguracionPage() {
           <h1 className="text-3xl font-bold">Configuración de Distribución</h1>
           <p className="text-muted-foreground">Configura cómo se distribuye el bote mensual entre monederos</p>
         </div>
-        <Button onClick={saveAllRules} disabled={!validation.isValid || saving}>
+        <Button onClick={saveConfiguration} disabled={!validation.isValid}>
           <Save className="mr-2 h-4 w-4" />
           Guardar Configuración
+          {!validation.isValid && " (Corrige la distribución)"}
         </Button>
       </div>
 
-      {error && (
-        <Alert>
-          <AlertTriangle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
+      {/* Explicación */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="h-5 w-5" />
+            Cómo Funciona
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-2 text-sm">
+            <p>
+              <strong>Cantidades Fijas:</strong> Se asignan primero, en orden de prioridad. Si no hay suficiente dinero,
+              se asigna lo que quede.
+            </p>
+            <p>
+              <strong>Porcentajes:</strong> Se aplican sobre el dinero restante después de las cantidades fijas.
+            </p>
+            <p>
+              <strong>Prioridad:</strong> Determina el orden de asignación. Menor número = mayor prioridad.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
 
-      {/* Reglas */}
+      {/* Reglas de distribución */}
       <Card>
         <CardHeader>
           <CardTitle>Reglas de Distribución</CardTitle>
@@ -231,35 +247,27 @@ export default function ConfiguracionPage() {
           {distributionRules
             .sort((a, b) => a.priority - b.priority)
             .map((rule) => {
-              const wallet = wallets.find((w) => w.id === rule.wallet_id)
+              const wallet = wallets.find((w) => w.id === rule.walletId)
               if (!wallet) return null
+
               return (
-                <div key={rule.wallet_id} className="p-4 border rounded-lg space-y-3">
+                <div key={rule.walletId} className="p-4 border rounded-lg space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{wallet.name}</span>
                       <Badge variant="outline">Prioridad {rule.priority}</Badge>
                     </div>
-                    <Button variant="outline" size="sm" onClick={() => removeRule(rule.wallet_id)}>
+                    <Button variant="outline" size="sm" onClick={() => removeRule(rule.walletId)}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
+
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div>
                       <Label>Tipo</Label>
                       <Select
                         value={rule.type}
-                        onValueChange={async (value: DistributionRuleType) => {
-                          updateRule(rule.wallet_id, "type", value)
-                          await upsertDistributionRule({
-                            user_id: userId,
-                            wallet_id: rule.wallet_id,
-                            type: value,
-                            value: rule.value,
-                            priority: rule.priority,
-                          })
-                          await loadData()
-                        }}
+                        onValueChange={(value: "percentage" | "fixed") => updateRule(rule.walletId, "type", value)}
                       >
                         <SelectTrigger>
                           <SelectValue />
@@ -280,6 +288,7 @@ export default function ConfiguracionPage() {
                         </SelectContent>
                       </Select>
                     </div>
+
                     <div>
                       <Label>{rule.type === "percentage" ? "Porcentaje (%)" : "Cantidad (€)"}</Label>
                       <Input
@@ -288,42 +297,24 @@ export default function ConfiguracionPage() {
                         step={rule.type === "percentage" ? "1" : "0.01"}
                         max={rule.type === "percentage" ? "100" : undefined}
                         value={rule.value}
-                        onChange={async (e) => {
-                          updateRule(rule.wallet_id, "value", Number.parseFloat(e.target.value) || 0)
-                          await upsertDistributionRule({
-                            user_id: userId,
-                            wallet_id: rule.wallet_id,
-                            type: rule.type,
-                            value: Number.parseFloat(e.target.value) || 0,
-                            priority: rule.priority,
-                          })
-                          await loadData()
-                        }}
+                        onChange={(e) => updateRule(rule.walletId, "value", Number.parseFloat(e.target.value) || 0)}
                         placeholder="0"
                       />
                     </div>
+
                     <div>
                       <Label>Prioridad</Label>
                       <Input
                         type="number"
                         min="1"
                         value={rule.priority}
-                        onChange={async (e) => {
-                          updateRule(rule.wallet_id, "priority", Number.parseInt(e.target.value) || 1)
-                          await upsertDistributionRule({
-                            user_id: userId,
-                            wallet_id: rule.wallet_id,
-                            type: rule.type,
-                            value: rule.value,
-                            priority: Number.parseInt(e.target.value) || 1,
-                          })
-                          await loadData()
-                        }}
+                        onChange={(e) => updateRule(rule.walletId, "priority", Number.parseInt(e.target.value) || 1)}
                       />
                     </div>
+
                     <div className="flex flex-col justify-end">
                       <div className="text-sm text-muted-foreground">
-                        Saldo actual: €{Number(wallet.current_balance).toFixed(2)}
+                        Saldo actual: €{wallet.currentBalance.toFixed(2)}
                       </div>
                     </div>
                   </div>
@@ -354,17 +345,17 @@ export default function ConfiguracionPage() {
                     </SelectTrigger>
                     <SelectContent>
                       {wallets
-                        .filter((wallet) => !distributionRules.some((rule) => rule.wallet_id === wallet.id))
+                        .filter((wallet) => !distributionRules.some((rule) => rule.walletId === wallet.id))
                         .map((wallet) => (
                           <SelectItem key={wallet.id} value={wallet.id}>
-                            {wallet.name} (€{Number(wallet.current_balance).toFixed(2)})
+                            {wallet.name} (€{wallet.currentBalance.toFixed(2)})
                           </SelectItem>
                         ))}
                     </SelectContent>
                   </Select>
                 </div>
                 <DialogFooter>
-                  <Button onClick={addRule} disabled={!selectedWalletToAdd || saving}>
+                  <Button onClick={addRule} disabled={!selectedWalletToAdd}>
                     Agregar
                   </Button>
                 </DialogFooter>
@@ -374,10 +365,10 @@ export default function ConfiguracionPage() {
         </CardContent>
       </Card>
 
-      {/* Validación y simulador */}
       {(() => {
         const validation = getDistributionValidation()
-        const activeRules = distributionRules.filter((rule) => Number(rule.value) > 0)
+        const activeRules = distributionRules.filter((rule) => rule.value > 0)
+
         if (activeRules.length === 0) {
           return (
             <Alert className="border-blue-200 bg-blue-50">
@@ -388,6 +379,7 @@ export default function ConfiguracionPage() {
             </Alert>
           )
         }
+
         if (!validation.isValid) {
           return (
             <Alert>
@@ -396,11 +388,12 @@ export default function ConfiguracionPage() {
             </Alert>
           )
         }
+
         return (
           <Alert className="border-green-200 bg-green-50">
             <TrendingUp className="h-4 w-4 text-green-600" />
             <AlertDescription className="text-green-800">
-              ✅ Distribución configurada correctamente ({getTotalPercentage()}%)
+              ✅ Distribución configurada correctamente (100%)
             </AlertDescription>
           </Alert>
         )
@@ -425,13 +418,15 @@ export default function ConfiguracionPage() {
             />
             <span className="text-muted-foreground">€</span>
           </div>
+
           <div className="space-y-3">
             <h4 className="font-medium">Distribución resultante:</h4>
-            {Object.entries(testDistribution).map(([wallet_id, amount]) => {
-              const wallet = wallets.find((w) => w.id === wallet_id)
+            {Object.entries(testDistribution).map(([walletId, amount]) => {
+              const wallet = wallets.find((w) => w.id === walletId)
               const percentage = testAmount > 0 ? (amount / testAmount) * 100 : 0
+
               return (
-                <div key={wallet_id} className="flex items-center justify-between p-3 bg-muted rounded-lg">
+                <div key={walletId} className="flex items-center justify-between p-3 bg-muted rounded-lg">
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{wallet?.name}</span>
                     <Badge variant="secondary">{percentage.toFixed(1)}%</Badge>
@@ -442,6 +437,7 @@ export default function ConfiguracionPage() {
                 </div>
               )
             })}
+
             <div className="flex justify-between items-center pt-2 border-t font-medium">
               <span>Total distribuido:</span>
               <span>
