@@ -1,9 +1,6 @@
-"use client" // Indica que este componente es un "Client Component" en Next.js (necesario para usar hooks, estado, efectos, etc.)
+"use client"
 
-// Imports de React y hooks
 import { useState, useEffect, useCallback } from "react"
-
-// Imports de componentes UI reutilizables de tu sistema de diseño (basados en shadcn/ui + Tailwind)
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -22,120 +19,75 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
-
-// Iconos de lucide-react para mejorar la UX visual y semántica
 import { Plus, Trash2, AlertTriangle, Save, TrendingUp, Settings, Percent, DollarSign } from "lucide-react"
-
-// Hook de Next.js para navegación programática entre páginas (router.push)
 import { useRouter } from "next/navigation"
-import { getCategories } from "@/services/categoryService"
-import { Asset, CategoryExpense, DistributionRule, EnrichedCategory, Wallet } from "@/types/models"
-import { fetchWallets } from "@/services/walletService"
-import { fetchAssets } from "@/services/assetService"
-import { useRequireAuth } from "@/hooks/useRequireAuth"
-import { getMonthlyIngestion } from "@/services/ingestionService"
-import { fetchDistributionRules } from "@/services/distributionRulesService"
 
-// ===========================
-//    TIPOS Y MODELOS DE DATOS
-// ===========================
-
-// Representa una categoría de gasto según el modelo YNAB extendido
 interface Category {
-  id: string // Identificador único
-  name: string // Nombre descriptivo
-  type: "gasto" | "gasto_acumulativo" | "gasto_mixto" | "gasto_acumulativo_opcional" // Tipo según reglas YNAB mejoradas
-  monthlyBudget: number // Presupuesto mensual asignado
-  active: boolean // Si está activa (no borrada ni archivada)
-  walletId?: string // Opcional: monedero asociado (sólo para acumulativas o mixtas)
+  id: string
+  name: string
+  type: "gasto" | "gasto_acumulativo" | "gasto_mixto" | "gasto_acumulativo_opcional"
+  monthlyBudget: number
+  active: boolean
+  walletId?: string
 }
 
-// Representa un bien o activo: cuenta bancaria, efectivo, inversión, etc.
-// interface Asset {
-//   id: string
-//   name: string
-//   type: string
-//   currentBalance: number // Saldo actual
-// }
+interface Asset {
+  id: string
+  name: string
+  type: string
+  currentBalance: number
+}
 
-// Ingreso puntual en el mes, asociado a un bien/activo
 interface Income {
   id: string
   amount: number
-  assetId: string // Debe estar asociado a un bien si amount > 0 (regla crítica)
+  assetId: string
   description?: string
 }
 
-// Gasto registrado para una categoría (puede incluir walletId si se compensa desde un monedero)
-// interface CategoryExpense {
-//   categoryId: string
-//   amount: number
-//   walletId?: string // De dónde sale el dinero en excesos o sobrantes acumulativos
-// }
-
-// Movimiento de monedero para reflejar impactos en saldo (excesos, sobrantes, etc.)
-interface WalletMovement {
-  walletId: string
-  amount: number // Positivo (entra dinero), negativo (sale dinero)
-  type: "excess" | "surplus" | "accumulative" // Tipo de movimiento según lógica de YNAB
-  description: string // Para mostrar en UI
+interface CategoryExpense {
+  categoryId: string
+  amount: number
+  walletId?: string
 }
 
-// Monedero/fondo para objetivos o acumulación de dinero
-// interface Wallet {
-//   id: string
-//   name: string
-//   currentBalance: number
-//   targetBalance?: number // Objetivo (opcional)
-// }
+interface WalletMovement {
+  walletId: string
+  amount: number
+  type: "excess" | "surplus" | "accumulative"
+  description: string
+}
 
-// // Regla avanzada para distribución del bote mensual (porcentaje o cantidad fija)
-// interface DistributionRule {
-//   walletId: string
-//   type: "percentage" | "fixed" // Dos tipos: porcentaje sobre el resto, o cantidad fija
-//   value: number // Valor porcentual o cantidad fija en euros
-//   priority: number // Orden de prioridad de aplicación (1 = primero)
-// }
+interface Wallet {
+  id: string
+  name: string
+  currentBalance: number
+  targetBalance?: number
+}
 
-// ===========================
-//        COMPONENTE PRINCIPAL
-// ===========================
+interface DistributionRule {
+  walletId: string
+  type: "percentage" | "fixed"
+  value: number
+  priority: number
+}
 
 export default function IngestaPage() {
-  const session = useRequireAuth()
-  if (!session) return null
-  
-  const router = useRouter() // Para navegar entre páginas tras guardar, etc.
-
-  // ============
-  // ESTADO LOCAL
-  // ============
-
-  // Mes y año seleccionados (por defecto: mes y año actual)
+  const router = useRouter()
   const [month, setMonth] = useState<number>(new Date().getMonth() + 1)
   const [year, setYear] = useState<number>(new Date().getFullYear())
-
-  // Listados de datos principales cargados desde localStorage/configuración inicial
-  const [categories, setCategories] = useState<EnrichedCategory[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
   const [wallets, setWallets] = useState<Wallet[]>([])
   const [assets, setAssets] = useState<Asset[]>([])
-
-  // Datos editables específicos de la ingesta de este mes
   const [categoryExpenses, setCategoryExpenses] = useState<CategoryExpense[]>([])
   const [incomes, setIncomes] = useState<Income[]>([])
   const [distributionRules, setDistributionRules] = useState<DistributionRule[]>([])
+  const [isDistributionDialogOpen, setIsDistributionDialogOpen] = useState(false)
+  const [errors, setErrors] = useState<{ [key: string]: string }>({})
 
-  // Estados auxiliares de la UI
-  const [isDistributionDialogOpen, setIsDistributionDialogOpen] = useState(false) // Si está abierta la modal de reglas de distribución
-  const [errors, setErrors] = useState<{ [key: string]: string }>({}) // Para feedback y validaciones
-
-  // ======================
-  // PERSISTENCIA TEMPORAL
-  // ======================
-  // Estos useEffect garantizan que los datos de la ingesta NO se pierdan si el usuario navega (UX amigable)
-
+  // Persistencia temporal de datos
   useEffect(() => {
-    // Cada vez que cambian los datos relevantes de la ingesta, se guardan temporalmente en localStorage
+    // Guardar datos temporales cuando cambien
     const tempData = {
       month,
       year,
@@ -147,7 +99,7 @@ export default function IngestaPage() {
   }, [month, year, categoryExpenses, incomes, distributionRules])
 
   useEffect(() => {
-    // Al cargar la página: si había datos temporales, los restauro (recuperación automática)
+    // Cargar datos temporales al iniciar
     const tempData = localStorage.getItem("tempIngestaData")
     if (tempData) {
       const parsed = JSON.parse(tempData)
@@ -168,109 +120,76 @@ export default function IngestaPage() {
   }, [])
 
   useEffect(() => {
-    // Cuando cambian mes/año: recargo los datos base (categorías, monederos, activos y reglas)
     loadData()
   }, [month, year])
 
   useEffect(() => {
-    // Revalido los datos cada vez que cambian entradas críticas: muestra errores de validación en tiempo real
     const validationErrors = getValidationErrors()
     setErrors(validationErrors)
   }, [month, year, categoryExpenses, incomes, categories, wallets, assets])
 
-  // ===========================
-  // FUNCIÓN PRINCIPAL DE CARGA
-  // ===========================
-  // Recupera categorías, monederos, bienes, reglas y si existe ya una ingesta previa para este mes/año
-  // DOSUPABASE
+  const loadData = () => {
+    // Cargar datos del localStorage
+    const savedCategories = localStorage.getItem("categories")
+    const savedWallets = localStorage.getItem("wallets")
+    const savedAssets = localStorage.getItem("assets")
+    const savedDistributionRules = localStorage.getItem("distributionRules")
 
-  async function loadData() {
-    // Cargo datos base desde localStorage --> DOSUPABASE
-    // const savedCategories = localStorage.getItem("categories")
-    const savedCategories = await getCategories() // Reemplaza con tu función de Supabase
-    const savedWallets = await fetchWallets() // Reemplaza con tu función de Supabase
-    const savedAssets = await fetchAssets(session!.user.id) // Reemplaza con tu función de Supabase
-    const savedDistributionRules = await fetchDistributionRules(session!.user.id)
-
-    if (savedCategories && savedCategories.length > 0) {
-      // const cats = JSON.parse(savedCategories)
-      // Sólo categorías activas (no archivadas)
-      const activeCategories = savedCategories.filter((cat: EnrichedCategory) => cat.active)
+    if (savedCategories) {
+      const cats = JSON.parse(savedCategories)
+      const activeCategories = cats.filter((cat: Category) => cat.active)
       setCategories(activeCategories)
 
-      // Inicializo gastos de cada categoría para el mes actual (para tener una fila de gasto por cada categoría)
-      const initialExpenses: CategoryExpense[] = activeCategories.map((cat: EnrichedCategory) => ({
-        id: '', // TODO: O puedes omitirlo si no lo usas aún (al crear la ingesta, Supabase lo puede autogenerar)
-        user_id: '', // TODO: <- deberías obtener el user_id de la sesión actual
-        monthly_ingestion_id: '', // <- igual, lo sabrás cuando se cree la ingesta del mes
-        category_id: cat.id,
+      // Inicializar gastos por categoría
+      const initialExpenses = activeCategories.map((cat: Category) => ({
+        categoryId: cat.id,
         amount: 0,
-        wallet_id: cat.wallet_id,
-        created_at: '', // Puedes omitirlo, lo genera Supabase automáticamente
+        walletId: cat.walletId,
       }))
       setCategoryExpenses(initialExpenses)
     }
 
-    if (savedWallets && savedWallets.length > 0) {
-      setWallets(savedWallets)
+    if (savedWallets) {
+      setWallets(JSON.parse(savedWallets))
     }
-    if (savedAssets && savedAssets.length > 0) {
-      setAssets(savedAssets)
+    if (savedAssets) {
+      setAssets(JSON.parse(savedAssets))
     }
 
-    // Cargo reglas de distribución del bote (si existen)
+    // Cargar reglas de distribución
     if (savedDistributionRules) {
-      setDistributionRules(savedDistributionRules)
+      setDistributionRules(JSON.parse(savedDistributionRules))
     } else {
-      // Si no hay reglas guardadas, creo una regla por monedero con porcentaje igualitario
-      const walletsData = savedWallets ? savedWallets : []
-      // Supón que walletsData es un array de monederos, ya obtenido de Supabase
-      const defaultRules: DistributionRule[] = walletsData.map((wallet, index) => ({
-        id: '', // Supabase lo generará después
-        user_id: '', // Lo añadirás cuando guardes
-        wallet_id: wallet.id,
-        type: "percentage",
+      // Crear reglas por defecto
+      const walletsData = savedWallets ? JSON.parse(savedWallets) : []
+      const defaultRules: DistributionRule[] = walletsData.map((wallet: Wallet, index: number) => ({
+        walletId: wallet.id,
+        type: "percentage" as const,
         value: walletsData.length > 0 ? Math.floor(100 / walletsData.length) : 0,
         priority: index + 1,
-        created_at: '', // Supabase lo pondrá luego
-        updated_at: '',
       }))
       setDistributionRules(defaultRules)
     }
 
-    // Compruebo si ya existe ingesta previa para este mes/año (regla crítica YNAB)
-    // const savedIngestions = localStorage.getItem("monthlyIngestions")
-    // if (savedIngestions) {
-    //   const ingestions = JSON.parse(savedIngestions)
-    //   const existing = ingestions.find((ing: any) => ing.month === month && ing.year === year)
-    //   if (existing) {
-    //     setIncomes(existing.incomes || [])
-    //     if (existing.categoryExpenses) {
-    //       setCategoryExpenses(existing.categoryExpenses)
-    //     }
-    //   } else {
-    //     // Si no hay, limpio ingresos para empezar de cero
-    //     setIncomes([])
-    //   }
-    // }
-    const savedIngestions = await getMonthlyIngestion(year, month)
+    // Verificar si ya existe ingesta para este mes
+    const savedIngestions = localStorage.getItem("monthlyIngestions")
     if (savedIngestions) {
-      // Cargar los ingresos del mes (tabla incomes)
-      setIncomes(savedIngestions.incomes || [])
-      // Cargar los gastos de categoría del mes (tabla category_expenses)
-      setCategoryExpenses(savedIngestions.expenses || [])
-    } else {
-      // Si no hay ingesta para ese mes/año, inicializa vacío para empezar de cero
-      setIncomes([])
+      const ingestions = JSON.parse(savedIngestions)
+      const existing = ingestions.find((ing: any) => ing.month === month && ing.year === year)
+      if (existing) {
+        setIncomes(existing.incomes || [])
+        if (existing.categoryExpenses) {
+          setCategoryExpenses(existing.categoryExpenses)
+        }
+      } else {
+        // Limpiar datos si cambiamos a un mes sin ingesta
+        setIncomes([])
+      }
     }
   }
 
-  // ========================
-  // CRUD DE INGRESOS DEL MES
-  // ========================
-
   const addIncome = () => {
-    // Validación: no permitir varios ingresos incompletos (sin bien asociado si amount > 0)
+    // Validar que no haya ingresos sin bien asociado
     const incompleteIncomes = incomes.filter((income) => income.amount > 0 && !income.assetId)
     if (incompleteIncomes.length > 0) {
       setErrors((prev) => ({
@@ -281,7 +200,6 @@ export default function IngestaPage() {
       return
     }
 
-    // Crea nuevo ingreso con campos vacíos (cantidad 0, assetId vacío)
     const newIncome: Income = {
       id: Date.now().toString(),
       amount: 0,
@@ -292,112 +210,86 @@ export default function IngestaPage() {
     setErrors((prev) => ({ ...prev, incomes: "" }))
   }
 
-  // Actualiza un campo concreto de un ingreso (id único, campo a modificar, valor)
   const updateIncome = (id: string, field: keyof Income, value: any) => {
     setIncomes(incomes.map((income) => (income.id === id ? { ...income, [field]: value } : income)))
-    setErrors((prev) => ({ ...prev, incomes: "" })) // Limpia errores al editar
+    // Limpiar errores cuando se actualiza
+    setErrors((prev) => ({ ...prev, incomes: "" }))
   }
 
-  // Elimina un ingreso por id
   const removeIncome = (id: string) => {
     setIncomes(incomes.filter((income) => income.id !== id))
     setErrors((prev) => ({ ...prev, incomes: "" }))
   }
 
-  // ========================
-  // CRUD DE GASTOS POR CATEGORÍA
-  // ========================
-
-  // Actualiza un campo concreto de un gasto por categoría
   const updateCategoryExpense = (categoryId: string, field: keyof CategoryExpense, value: any) => {
     setCategoryExpenses((prev) =>
-      prev.map((expense) => (expense.category_id === categoryId ? { ...expense, [field]: value } : expense)),
+      prev.map((expense) => (expense.categoryId === categoryId ? { ...expense, [field]: value } : expense)),
     )
   }
 
-  // ========================
-  // CRUD DE REGLAS DE DISTRIBUCIÓN
-  // ========================
-
-  // Actualiza una regla de distribución concreta (walletId es el id único de la regla)
   const updateDistributionRule = (walletId: string, field: keyof DistributionRule, value: any) => {
     setDistributionRules((prev) =>
-      prev.map((rule) => (rule.wallet_id === walletId ? { ...rule, [field]: value } : rule)),
+      prev.map((rule) => (rule.walletId === walletId ? { ...rule, [field]: value } : rule)),
     )
   }
 
-  // Guarda las reglas de distribución en localStorage y cierra el diálogo
   const saveDistributionRules = () => {
     localStorage.setItem("distributionRules", JSON.stringify(distributionRules))
     setIsDistributionDialogOpen(false)
   }
 
-  // ==========================
-  // HELPERS DE CATEGORÍAS/GASTOS
-  // ==========================
-
-  // Obtiene el gasto registrado para una categoría concreta
   const getCategoryExpense = (categoryId: string) => {
-    return categoryExpenses.find((exp) => exp.category_id === categoryId)
+    return categoryExpenses.find((exp) => exp.categoryId === categoryId)
   }
 
-  // Calcula el exceso de gasto sobre presupuesto de una categoría concreta
   const getCategoryExcess = (categoryId: string) => {
     const category = categories.find((cat) => cat.id === categoryId)
     const expense = getCategoryExpense(categoryId)
     if (!category || !expense) return 0
-    return Math.max(0, expense.amount - category.monthly_budget)
+    return Math.max(0, expense.amount - category.monthlyBudget)
   }
 
-  // Calcula el sobrante (lo que no se ha gastado del presupuesto) en una categoría
   const getCategorySurplus = (categoryId: string) => {
     const category = categories.find((cat) => cat.id === categoryId)
     const expense = getCategoryExpense(categoryId)
     if (!category || !expense) return 0
-    return Math.max(0, category.monthly_budget - expense.amount)
+    return Math.max(0, category.monthlyBudget - expense.amount)
   }
 
-  // Determina si una categoría es de tipo acumulativo (incluyendo mixtas y opcionales)
   const isAccumulativeCategory = (categoryId: string) => {
     const category = categories.find((cat) => cat.id === categoryId)
     return (
       category &&
-      (category.category_types?.name === "gasto_acumulativo" ||
-        category.category_types?.name === "gasto_mixto" ||
-        category.category_types?.name === "gasto_acumulativo_opcional")
+      (category.type === "gasto_acumulativo" ||
+        category.type === "gasto_mixto" ||
+        category.type === "gasto_acumulativo_opcional")
     )
   }
-
-  // ==========================
-  // CÁLCULO DE MOVIMIENTOS DE MONEDERO
-  // ==========================
-  // Devuelve todos los movimientos de monedero derivados de la ingesta actual
 
   const calculateWalletMovements = (): WalletMovement[] => {
     const movements: WalletMovement[] = []
 
     categoryExpenses.forEach((expense) => {
-      const category = categories.find((cat) => cat.id === expense.category_id)
+      const category = categories.find((cat) => cat.id === expense.categoryId)
       if (!category) return
 
-      const excess = getCategoryExcess(expense.category_id)
-      const surplus = getCategorySurplus(expense.category_id)
+      const excess = getCategoryExcess(expense.categoryId)
+      const surplus = getCategorySurplus(expense.categoryId)
 
-      // EXCESO: Si hay exceso y tiene walletId (es decir, se cubre desde monedero, NO desde bote mensual)
-      if (excess > 0 && expense.wallet_id) {
+      // Solo crear movimiento si el exceso se cubre con un monedero específico
+      if (excess > 0 && expense.walletId) {
         movements.push({
-          walletId: expense.wallet_id,
-          amount: -excess, // Sale dinero del monedero
+          walletId: expense.walletId,
+          amount: -excess,
           type: "excess",
           description: `Exceso en ${category.name}: €${excess.toFixed(2)}`,
         })
       }
 
-      // SOBRANTE: Si hay sobrante en acumulativas, y hay walletId (entra en el monedero)
-      if (surplus > 0 && isAccumulativeCategory(expense.category_id) && expense.wallet_id) {
+      if (surplus > 0 && isAccumulativeCategory(expense.categoryId) && expense.walletId) {
         movements.push({
-          walletId: expense.wallet_id,
-          amount: surplus, // Entra dinero al monedero
+          walletId: expense.walletId,
+          amount: surplus,
           type: "accumulative",
           description: `Sobrante de ${category.name}: €${surplus.toFixed(2)}`,
         })
@@ -407,74 +299,58 @@ export default function IngestaPage() {
     return movements
   }
 
-  // ==========================
-  // CÁLCULO DE TOTALES GENERALES DEL MES
-  // ==========================
-  // Calcula: presupuesto total, gastado, ingresos, bote mensual, excesos cubiertos por monederos
-
   const calculateTotals = () => {
-    const totalBudget = categories.reduce((sum, cat) => sum + cat.monthly_budget, 0)
+    const totalBudget = categories.reduce((sum, cat) => sum + cat.monthlyBudget, 0)
     const totalSpent = categoryExpenses.reduce((sum, expense) => sum + expense.amount, 0)
     const totalIncome = incomes.reduce((sum, income) => sum + income.amount, 0)
 
-    // Calcular excesos que se cubren desde monederos
+    // Calcular excesos que se compensan con monederos específicos
     let excessesCoveredByWallets = 0
 
     categoryExpenses.forEach((expense) => {
-      const category = categories.find((cat) => cat.id === expense.category_id)
-      if (category && expense.wallet_id) {
-        const excess = Math.max(0, expense.amount - category.monthly_budget)
+      const category = categories.find((cat) => cat.id === expense.categoryId)
+      if (category && expense.walletId) {
+        const excess = Math.max(0, expense.amount - category.monthlyBudget)
         if (excess > 0) {
           excessesCoveredByWallets += excess
         }
       }
     })
 
-    // Bote mensual: ingresos - gastos + excesos cubiertos por monederos (regla fundamental YNAB)
-    const monthlyPot = totalIncome - totalSpent + excessesCoveredByWallets //TOREVIEW: Los excesos son negativos? Si son positivos, hay que restarlos
+    // El bote mensual se calcula como: ingresos - gastos + excesos compensados por monederos
+    // Los excesos sin monedero asignado se restan automáticamente del bote
+    const monthlyPot = totalIncome - totalSpent + excessesCoveredByWallets
 
     return { totalBudget, totalSpent, totalIncome, monthlyPot, excessesCoveredByWallets }
   }
 
-  // ==========================
-  // CÁLCULO DE DISTRIBUCIÓN DEL BOTE SEGÚN REGLAS AVANZADAS
-  // ==========================
-  // Aplica primero cantidades fijas por prioridad, luego porcentajes sobre el remanente
-  // Devuelve objeto { walletId: cantidad }
-
   const calculateDistributionFromRules = (monthlyPot: number) => {
-    // Ordena reglas por prioridad (menor primero)
     const sortedRules = [...distributionRules].sort((a, b) => a.priority - b.priority)
     const distribution: { [walletId: string]: number } = {}
     let remainingAmount = monthlyPot
 
-    // 1. Aplicar cantidades fijas
+    // Primero aplicar cantidades fijas
     sortedRules
       .filter((rule) => rule.type === "fixed")
       .forEach((rule) => {
         const assignedAmount = Math.min(rule.value, remainingAmount)
-        distribution[rule.wallet_id] = assignedAmount
+        distribution[rule.walletId] = assignedAmount
         remainingAmount -= assignedAmount
       })
 
-    // 2. Aplicar porcentajes sobre el remanente
+    // Luego aplicar porcentajes sobre el monto restante
     const percentageRules = sortedRules.filter((rule) => rule.type === "percentage")
     const totalPercentage = percentageRules.reduce((sum, rule) => sum + rule.value, 0)
 
     if (totalPercentage > 0 && remainingAmount > 0) {
       percentageRules.forEach((rule) => {
         const assignedAmount = (remainingAmount * rule.value) / totalPercentage
-        distribution[rule.wallet_id] = (distribution[rule.wallet_id] || 0) + assignedAmount
+        distribution[rule.walletId] = (distribution[rule.walletId] || 0) + assignedAmount
       })
     }
 
     return distribution
   }
-
-  // ==========================
-  // RESUMEN DE MOVIMIENTOS POR MONEDERO
-  // ==========================
-  // Devuelve objeto { walletId: sumaMovimientos }
 
   const getWalletMovementsSummary = () => {
     const movements = calculateWalletMovements()
@@ -490,11 +366,6 @@ export default function IngestaPage() {
     return summary
   }
 
-  // ==========================
-  // COMPROBAR SI YA EXISTE INGESTA PARA ESTE MES/AÑO
-  // ==========================
-  // Devuelve true/false (regla crítica para no duplicar ingestas)
-
   const checkIfMonthExists = useCallback(() => {
     const savedIngestions = localStorage.getItem("monthlyIngestions")
     if (!savedIngestions) return false
@@ -503,37 +374,33 @@ export default function IngestaPage() {
     return ingestions.some((ing: any) => ing.month === month && ing.year === year)
   }, [month, year])
 
-  // ==========================
-  // COMPROBAR SI EL BOTE MENSUAL PUEDE CUBRIR UN EXCESO
-  // ==========================
-  // Función avanzada de validación: ayuda en UI para saber si el exceso puede cubrirse por el bote mensual
-
+  // Función auxiliar para verificar si el bote puede cubrir un exceso
   const canPotCoverExcess = (categoryId: string) => {
     const category = categories.find((cat) => cat.id === categoryId)
     const expense = getCategoryExpense(categoryId)
     if (!category || !expense) return false
 
-    const excess = Math.max(0, expense.amount - category.monthly_budget)
+    const excess = Math.max(0, expense.amount - category.monthlyBudget)
     if (excess === 0) return false
 
-    // Cálculo del bote sin este exceso, sumando otros excesos cubiertos por monedero/bote
+    // Calcular bote preliminar sin considerar este exceso específico
     const totalIncome = incomes.reduce((sum, income) => sum + income.amount, 0)
     const totalSpent = categoryExpenses.reduce((sum, exp) => sum + exp.amount, 0)
 
-    // Otros excesos cubiertos por monederos o bote (excluyendo el actual)
+    // Sumar excesos ya cubiertos por monederos (excluyendo el actual)
     let otherExcessesCoveredByWallets = 0
     let otherExcessesCoveredByPot = 0
 
     categoryExpenses.forEach((exp) => {
-      if (exp.category_id === categoryId) return // Excluir el actual
+      if (exp.categoryId === categoryId) return // Excluir el actual
 
-      const cat = categories.find((c) => c.id === exp.category_id)
+      const cat = categories.find((c) => c.id === exp.categoryId)
       if (cat) {
-        const otherExcess = Math.max(0, exp.amount - cat.monthly_budget)
+        const otherExcess = Math.max(0, exp.amount - cat.monthlyBudget)
         if (otherExcess > 0) {
-          if (exp.wallet_id === "monthly-pot") {
+          if (exp.walletId === "monthly-pot") {
             otherExcessesCoveredByPot += otherExcess
-          } else if (exp.wallet_id) {
+          } else if (exp.walletId) {
             otherExcessesCoveredByWallets += otherExcess
           }
         }
@@ -544,28 +411,23 @@ export default function IngestaPage() {
     return preliminaryPot >= excess
   }
 
-  // ==========================
-  // VALIDACIONES CRÍTICAS DE INGESTA
-  // ==========================
-  // Devuelve objeto { campo: error } con todos los posibles errores de validación
-
   const getValidationErrors = () => {
     const newErrors: { [key: string]: string } = {}
 
-    // 1. No duplicar meses
+    // Verificar si el mes ya existe
     if (checkIfMonthExists()) {
       newErrors.month = `Ya existe una ingesta para ${month}/${year}. No se puede duplicar.`
     }
 
-    // 2. Categorías acumulativas con gasto DEBEN tener monedero asignado
+    // Verificar que categorías acumulativas con gasto tienen monedero asignado
     for (const expense of categoryExpenses) {
-      if (expense.amount > 0 && isAccumulativeCategory(expense.category_id) && !expense.wallet_id) {
+      if (expense.amount > 0 && isAccumulativeCategory(expense.categoryId) && !expense.walletId) {
         newErrors.categories = "Las categorías acumulativas con gasto deben tener un monedero asignado"
         break
       }
     }
 
-    // 3. Ingresos con cantidad > 0 DEBEN tener bien asociado
+    // Verificar que todos los ingresos tienen bien asignado
     for (const income of incomes) {
       if (income.amount > 0 && !income.assetId) {
         newErrors.incomes = "Todos los ingresos con cantidad deben tener un bien asociado"
@@ -573,7 +435,7 @@ export default function IngestaPage() {
       }
     }
 
-    // 4. Distribución de porcentajes debe sumar exactamente 100%
+    // Validar que la distribución sume 100% si hay reglas activas
     const activeRules = distributionRules.filter((rule) => rule.value > 0)
     if (activeRules.length > 0) {
       const totalPercentage = activeRules
@@ -588,16 +450,6 @@ export default function IngestaPage() {
     return newErrors
   }
 
-  // ==========================
-  // GUARDAR INGESTA COMPLETA
-  // ==========================
-  // 1. Valida
-  // 2. Convierte a formato legacy (compatibilidad con exportación/importación)
-  // 3. Guarda en localStorage
-  // 4. Actualiza saldos de monederos y bienes
-  // 5. Limpia persistencia temporal
-  // 6. Dispara evento global y navega
-
   const saveIngestion = () => {
     const validationErrors = getValidationErrors()
     if (Object.keys(validationErrors).length > 0) {
@@ -605,18 +457,17 @@ export default function IngestaPage() {
       return
     }
 
-    // Adaptación a formato legacy de ingestas para compatibilidad
+    // Convertir categoryExpenses a formato legacy para compatibilidad
     const expenses: { [categoryId: string]: number } = {}
     const walletAdjustments: { [categoryId: string]: string } = {}
 
     categoryExpenses.forEach((expense) => {
-      expenses[expense.category_id] = expense.amount
-      if (expense.wallet_id) {
-        walletAdjustments[expense.category_id] = expense.wallet_id
+      expenses[expense.categoryId] = expense.amount
+      if (expense.walletId) {
+        walletAdjustments[expense.categoryId] = expense.walletId
       }
     })
 
-    // Estructura completa de la ingesta mensual
     const ingestionData = {
       id: `${year}-${month}`,
       month,
@@ -629,103 +480,86 @@ export default function IngestaPage() {
       distributionRules,
     }
 
-    // Guarda la ingesta en localStorage (acumula histórico de ingestas)
+    // Guardar en localStorage
     const savedIngestions = localStorage.getItem("monthlyIngestions")
     const ingestions = savedIngestions ? JSON.parse(savedIngestions) : []
 
     ingestions.push(ingestionData)
     localStorage.setItem("monthlyIngestions", JSON.stringify(ingestions))
 
-    // Actualiza saldos de monederos y bienes (según lógica YNAB)
+    // Actualizar saldos de monederos y bienes
     updateBalances(ingestionData)
 
-    // Limpia datos temporales (ya no es necesario)
+    // Limpiar datos temporales
     localStorage.removeItem("tempIngestaData")
 
-    // Dispara evento global para que otras pantallas se refresquen
+    // Disparar evento para actualizar otras pantallas
     window.dispatchEvent(new CustomEvent("ingestaCompleted"))
 
     alert("Ingesta guardada correctamente")
-    router.push("/") // Vuelve a la pantalla principal
+    router.push("/")
   }
-
-  // ==========================
-  // ACTUALIZAR SALDOS DE MONEDEROS Y BIENES AL GUARDAR INGESTA
-  // ==========================
-  // Aplica todos los movimientos calculados, así como la distribución del bote, y suma ingresos a activos
 
   const updateBalances = (ingestionData: any) => {
     const movements = calculateWalletMovements()
     const totals = calculateTotals()
     const distribution = calculateDistributionFromRules(totals.monthlyPot)
 
-    // 1. Actualizar monederos: aplicar movimientos y distribución del bote
+    // Actualizar monederos
     const updatedWallets = wallets.map((wallet) => {
       let balanceChange = 0
 
-      // Movimientos específicos de categorías (excesos/sobrantes)
+      // Aplicar movimientos específicos de categorías
       movements.forEach((movement) => {
         if (movement.walletId === wallet.id) {
           balanceChange += movement.amount
         }
       })
 
-      // Sumar la parte del bote que le toca por distribución
+      // Sumar distribución del bote mensual
       const distributionAmount = distribution[wallet.id] || 0
       balanceChange += distributionAmount
 
       return {
         ...wallet,
-        currentBalance: wallet.current_balance + balanceChange,
+        currentBalance: wallet.currentBalance + balanceChange,
       }
     })
 
-    // 2. Actualizar bienes (assets): sumar ingresos del mes
+    // Actualizar bienes
     const updatedAssets = assets.map((asset) => {
       const assetIncomes = incomes.filter((income) => income.assetId === asset.id)
       const totalIncome = assetIncomes.reduce((sum, income) => sum + income.amount, 0)
 
       return {
         ...asset,
-        currentBalance: asset.current_balance + totalIncome,
+        currentBalance: asset.currentBalance + totalIncome,
       }
     })
 
-    // Guarda los nuevos saldos
-    localStorage.setItem("wallets", JSON.stringify(updatedWallets)) //SUPABASE
-    localStorage.setItem("assets", JSON.stringify(updatedAssets)) //SUPABASE
+    localStorage.setItem("wallets", JSON.stringify(updatedWallets))
+    localStorage.setItem("assets", JSON.stringify(updatedAssets))
   }
-
-  // ==========================
-  // CÁLCULOS AUXILIARES PARA MOSTRAR EN UI
-  // ==========================
 
   const totals = calculateTotals()
   const walletMovements = calculateWalletMovements()
   const walletSummary = getWalletMovementsSummary()
   const monthlyPotDistribution = calculateDistributionFromRules(totals.monthlyPot)
 
-  // ==========================
-  // RENDER DE LA INTERFAZ
-  // ==========================
-  // ¡Esta parte se apoya intensamente en el sistema de componentes shadcn/ui!
-
   return (
     <div className="container mx-auto p-6 space-y-6">
-      {/* Encabezado de la pantalla */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Ingesta Mensual</h1>
           <p className="text-muted-foreground">Introduce los datos del mes</p>
         </div>
-        {/* Botón de guardar ingesta, sólo habilitado si no hay errores */}
         <Button onClick={saveIngestion} disabled={Object.keys(errors).length > 0}>
           <Save className="mr-2 h-4 w-4" />
           Guardar Ingesta
         </Button>
       </div>
 
-      {/* Mensaje de errores generales en forma de alerta visual */}
+      {/* Errores generales */}
       {Object.keys(errors).length > 0 && (
         <Alert>
           <AlertTriangle className="h-4 w-4" />
@@ -739,13 +573,12 @@ export default function IngestaPage() {
         </Alert>
       )}
 
-      {/* --- SECCIÓN: Selección de mes y año --- */}
+      {/* Selección de mes y año */}
       <Card>
         <CardHeader>
           <CardTitle>Período</CardTitle>
         </CardHeader>
         <CardContent className="flex gap-4">
-          {/* Selector de mes (1 a 12, nombre del mes en español) */}
           <div className="space-y-2">
             <Label>Mes</Label>
             <Select value={month.toString()} onValueChange={(value) => setMonth(Number.parseInt(value))}>
@@ -761,7 +594,6 @@ export default function IngestaPage() {
               </SelectContent>
             </Select>
           </div>
-          {/* Selector de año (input numérico) */}
           <div className="space-y-2">
             <Label>Año</Label>
             <Input
@@ -771,7 +603,6 @@ export default function IngestaPage() {
               className="w-24"
             />
           </div>
-          {/* Mensaje si ya existe ingesta para ese mes */}
           {checkIfMonthExists() && (
             <div className="flex items-center">
               <Alert className="border-orange-200 bg-orange-50">
@@ -785,36 +616,33 @@ export default function IngestaPage() {
         </CardContent>
       </Card>
 
-      {/* --- SECCIÓN: Gastos por Categoría --- */}
+      {/* Gastos por categoría */}
       <Card>
         <CardHeader>
           <CardTitle>Gastos por Categoría</CardTitle>
           <CardDescription>Introduce el gasto realizado en cada categoría</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Recorre todas las categorías activas */}
           {categories.map((category) => {
             const expense = getCategoryExpense(category.id)
             const spent = expense?.amount || 0
             const excess = getCategoryExcess(category.id)
             const surplus = getCategorySurplus(category.id)
-            const percentage = category.monthly_budget > 0 ? (spent / category.monthly_budget) * 100 : 0
+            const percentage = category.monthlyBudget > 0 ? (spent / category.monthlyBudget) * 100 : 0
             const isAccumulative = isAccumulativeCategory(category.id)
 
             return (
               <div key={category.id} className="space-y-3 p-4 border rounded-lg">
                 <div className="flex items-center justify-between">
-                  {/* Nombre, tipo y si requiere monedero */}
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{category.name}</span>
-                    <Badge variant="outline">{category.category_types!.name.replace("_", " ")}</Badge>
+                    <Badge variant="outline">{category.type.replace("_", " ")}</Badge>
                     {isAccumulative && <Badge variant="secondary">Requiere Monedero</Badge>}
                   </div>
-                  <div className="text-sm text-muted-foreground">Presupuesto: €{category.monthly_budget.toFixed(2)}</div>
+                  <div className="text-sm text-muted-foreground">Presupuesto: €{category.monthlyBudget.toFixed(2)}</div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {/* Input de gasto realizado */}
                   <div>
                     <Label>Gasto realizado</Label>
                     <Input
@@ -829,14 +657,13 @@ export default function IngestaPage() {
                     />
                   </div>
 
-                  {/* Selector de monedero (si aplica por lógica YNAB) */}
                   {(isAccumulative || excess > 0) && (
                     <div>
                       <Label>{isAccumulative ? "Monedero (obligatorio)" : "Cobertura del exceso (opcional)"}</Label>
                       <Select
-                        value={expense?.wallet_id || ""}
+                        value={expense?.walletId || ""}
                         onValueChange={(value) =>
-                          updateCategoryExpense(category.id, "wallet_id", value === "none" ? "" : value)
+                          updateCategoryExpense(category.id, "walletId", value === "none" ? "" : value)
                         }
                       >
                         <SelectTrigger>
@@ -845,7 +672,6 @@ export default function IngestaPage() {
                           />
                         </SelectTrigger>
                         <SelectContent>
-                          {/* Si NO es acumulativa, se puede elegir "Bote mensual" (sin monedero concreto) */}
                           {!isAccumulative && (
                             <SelectItem value="none">
                               <div className="flex items-center">
@@ -854,10 +680,9 @@ export default function IngestaPage() {
                               </div>
                             </SelectItem>
                           )}
-                          {/* Lista de monederos disponibles */}
                           {wallets.map((wallet) => (
                             <SelectItem key={wallet.id} value={wallet.id}>
-                              {wallet.name} (€{wallet.current_balance.toFixed(2)})
+                              {wallet.name} (€{wallet.currentBalance.toFixed(2)})
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -865,34 +690,31 @@ export default function IngestaPage() {
                     </div>
                   )}
 
-                  {/* Barra de progreso y porcentaje sobre presupuesto */}
                   <div className="flex flex-col justify-end">
                     <Progress value={Math.min(percentage, 100)} className="mb-2" />
                     <div className="text-xs text-center">{percentage.toFixed(1)}% del presupuesto</div>
                   </div>
                 </div>
 
-                {/* Alerta visual de exceso de gasto */}
                 {excess > 0 && (
                   <Alert>
                     <AlertTriangle className="h-4 w-4" />
                     <AlertDescription>
                       <strong>Exceso de €{excess.toFixed(2)}</strong>
-                      {expense?.wallet_id
-                        ? ` - Se descontará del monedero "${wallets.find((w) => w.id === expense.wallet_id)?.name}"`
+                      {expense?.walletId
+                        ? ` - Se descontará del monedero "${wallets.find((w) => w.id === expense.walletId)?.name}"`
                         : " - Se descontará del bote mensual"}
                     </AlertDescription>
                   </Alert>
                 )}
 
-                {/* Alerta visual de sobrante acumulado */}
                 {surplus > 0 && isAccumulative && (
                   <Alert className="border-green-200 bg-green-50">
                     <TrendingUp className="h-4 w-4 text-green-600" />
                     <AlertDescription className="text-green-800">
                       <strong>Sobrante de €{surplus.toFixed(2)}</strong>
-                      {expense?.wallet_id
-                        ? ` - Se añadirá al monedero "${wallets.find((w) => w.id === expense.wallet_id)?.name}"`
+                      {expense?.walletId
+                        ? ` - Se añadirá al monedero "${wallets.find((w) => w.id === expense.walletId)?.name}"`
                         : " - Selecciona un monedero para el sobrante"}
                     </AlertDescription>
                   </Alert>
@@ -903,14 +725,13 @@ export default function IngestaPage() {
         </CardContent>
       </Card>
 
-      {/* --- SECCIÓN: Ingresos del mes --- */}
+      {/* Ingresos */}
       <Card>
         <CardHeader>
           <CardTitle>Ingresos del Mes</CardTitle>
           <CardDescription>Registra todos los ingresos y su asignación a bienes</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Lista de ingresos */}
           {incomes.map((income) => (
             <div key={income.id} className="flex gap-4 items-end p-4 border rounded-lg">
               <div className="flex-1">
@@ -947,20 +768,17 @@ export default function IngestaPage() {
                   placeholder="Descripción del ingreso"
                 />
               </div>
-              {/* Botón para eliminar ingreso */}
               <Button variant="outline" size="icon" onClick={() => removeIncome(income.id)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
           ))}
 
-          {/* Botón para añadir ingreso nuevo */}
           <div className="space-y-2">
             <Button onClick={addIncome} variant="outline" className="w-full bg-transparent">
               <Plus className="mr-2 h-4 w-4" />
               Agregar Ingreso
             </Button>
-            {/* Error específico de ingresos */}
             {errors.incomes && (
               <Alert>
                 <AlertTriangle className="h-4 w-4" />
@@ -971,7 +789,7 @@ export default function IngestaPage() {
         </CardContent>
       </Card>
 
-      {/* --- SECCIÓN: Resumen de movimientos de monederos --- */}
+      {/* Resumen de movimientos de monederos */}
       <Card>
         <CardHeader>
           <CardTitle>Movimientos de Monederos</CardTitle>
@@ -994,12 +812,11 @@ export default function IngestaPage() {
                     </div>
                     <div className="text-right">
                       <div className="text-sm text-muted-foreground">
-                        Saldo actual: €{wallet.current_balance.toFixed(2)}
+                        Saldo actual: €{wallet.currentBalance.toFixed(2)}
                       </div>
                     </div>
                   </div>
 
-                  {/* Listado de movimientos individuales */}
                   <div className="space-y-2">
                     {movements.map((movement, index) => (
                       <div key={index} className="flex justify-between items-center text-sm">
@@ -1010,7 +827,6 @@ export default function IngestaPage() {
                       </div>
                     ))}
 
-                    {/* Aporte del bote mensual */}
                     {monthlyPotShare > 0 && (
                       <div className="flex justify-between items-center text-sm border-t pt-2">
                         <span>Bote mensual</span>
@@ -1019,7 +835,6 @@ export default function IngestaPage() {
                     )}
 
                     <Separator />
-                    {/* Total neto de movimientos */}
                     <div className="flex justify-between items-center font-medium">
                       <span>Total cambio:</span>
                       <span className={totalMovement + monthlyPotShare >= 0 ? "text-green-600" : "text-red-600"}>
@@ -1034,12 +849,11 @@ export default function IngestaPage() {
         </CardContent>
       </Card>
 
-      {/* --- SECCIÓN: Resumen del mes + Configuración de distribución --- */}
+      {/* Resumen del mes */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
             Resumen del Mes
-            {/* Botón para abrir el diálogo de configuración avanzada de reglas de distribución */}
             <Dialog open={isDistributionDialogOpen} onOpenChange={setIsDistributionDialogOpen}>
               <DialogTrigger asChild>
                 <Button variant="outline" size="sm">
@@ -1053,28 +867,26 @@ export default function IngestaPage() {
                   <DialogDescription>Modifica cómo se distribuye el bote mensual entre tus monederos</DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 max-h-96 overflow-y-auto">
-                  {/* Lista editable de reglas, ordenada por prioridad */}
                   {distributionRules
                     .sort((a, b) => a.priority - b.priority)
                     .map((rule) => {
-                      const wallet = wallets.find((w) => w.id === rule.wallet_id)
+                      const wallet = wallets.find((w) => w.id === rule.walletId)
                       if (!wallet) return null
 
                       return (
-                        <div key={rule.wallet_id} className="p-4 border rounded-lg space-y-3">
+                        <div key={rule.walletId} className="p-4 border rounded-lg space-y-3">
                           <div className="flex items-center justify-between">
                             <span className="font-medium">{wallet.name}</span>
                             <Badge variant="outline">Prioridad {rule.priority}</Badge>
                           </div>
 
                           <div className="grid grid-cols-3 gap-4">
-                            {/* Selector de tipo de regla (porcentaje/cantidad fija) */}
                             <div>
                               <Label>Tipo</Label>
                               <Select
                                 value={rule.type}
                                 onValueChange={(value: "percentage" | "fixed") =>
-                                  updateDistributionRule(rule.wallet_id, "type", value)
+                                  updateDistributionRule(rule.walletId, "type", value)
                                 }
                               >
                                 <SelectTrigger>
@@ -1097,7 +909,6 @@ export default function IngestaPage() {
                               </Select>
                             </div>
 
-                            {/* Campo para valor: porcentaje o cantidad fija */}
                             <div>
                               <Label>{rule.type === "percentage" ? "Porcentaje (%)" : "Cantidad (€)"}</Label>
                               <Input
@@ -1107,13 +918,12 @@ export default function IngestaPage() {
                                 max={rule.type === "percentage" ? "100" : undefined}
                                 value={rule.value}
                                 onChange={(e) =>
-                                  updateDistributionRule(rule.wallet_id, "value", Number.parseFloat(e.target.value) || 0)
+                                  updateDistributionRule(rule.walletId, "value", Number.parseFloat(e.target.value) || 0)
                                 }
                                 placeholder="0"
                               />
                             </div>
 
-                            {/* Campo de prioridad */}
                             <div>
                               <Label>Prioridad</Label>
                               <Input
@@ -1122,7 +932,7 @@ export default function IngestaPage() {
                                 value={rule.priority}
                                 onChange={(e) =>
                                   updateDistributionRule(
-                                    rule.wallet_id,
+                                    rule.walletId,
                                     "priority",
                                     Number.parseInt(e.target.value) || 1,
                                   )
@@ -1142,7 +952,6 @@ export default function IngestaPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {/* Cuatro KPIs principales del mes: presupuesto, gastado, ingresos, bote */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="text-center">
               <div className="text-2xl font-bold">€{totals.totalBudget.toFixed(2)}</div>
@@ -1164,7 +973,6 @@ export default function IngestaPage() {
             </div>
           </div>
 
-          {/* Mensaje de excesos cubiertos por monederos (no reducen el bote) */}
           {totals.excessesCoveredByWallets > 0 && (
             <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
               <div className="text-sm text-blue-800">
@@ -1174,13 +982,12 @@ export default function IngestaPage() {
             </div>
           )}
 
-          {/* Mensaje de excesos cubiertos por bote mensual */}
           {(() => {
-            // Calcular excesos que se cubren desde el bote mensual
+            // Calcular excesos que van al bote mensual
             const excessesToPot = categoryExpenses.reduce((sum, expense) => {
-              const category = categories.find((cat) => cat.id === expense.category_id)
-              if (category && !expense.wallet_id) {
-                const excess = Math.max(0, expense.amount - category.monthly_budget)
+              const category = categories.find((cat) => cat.id === expense.categoryId)
+              if (category && !expense.walletId) {
+                const excess = Math.max(0, expense.amount - category.monthlyBudget)
                 return sum + excess
               }
               return sum
@@ -1197,7 +1004,6 @@ export default function IngestaPage() {
             )
           })()}
 
-          {/* Simulación visual de la distribución del bote mensual */}
           {totals.monthlyPot > 0 && (
             <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-lg">
               <h4 className="font-medium mb-2 text-slate-900">Distribución del Bote Mensual:</h4>
