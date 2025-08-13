@@ -29,12 +29,14 @@ import { Plus, Trash2, AlertTriangle, Save, TrendingUp, Settings, Percent, Dolla
 // Hook de Next.js para navegación programática entre páginas (router.push)
 import { useRouter } from "next/navigation"
 import { getCategories } from "@/services/categoryService"
-import { Asset, CategoryExpense, DistributionRule, EnrichedCategory, Wallet } from "@/types/models"
-import { fetchWallets } from "@/services/walletService"
-import { fetchAssets } from "@/services/assetService"
+import { Asset, CategoryExpense, DistributionRule, EnrichedCategory, Income, Wallet, WalletTransaction, WalletTransactionType } from "@/types/models"
+import { fetchWallets, updateWallet } from "@/services/walletService"
+import { fetchAssets, updateAsset } from "@/services/assetService"
 import { useRequireAuth } from "@/hooks/useRequireAuth"
-import { getMonthlyIngestion } from "@/services/ingestionService"
+import { getMonthlyIngestion, saveMonthlyIngestion } from "@/services/ingestionService"
 import { fetchDistributionRules } from "@/services/distributionRulesService"
+import { createWalletTransaction } from "@/services/walletTransactionService"
+import { createAssetTransaction } from "@/services/assetTransactionService"
 
 // ===========================
 //    TIPOS Y MODELOS DE DATOS
@@ -50,6 +52,15 @@ interface Category {
   walletId?: string // Opcional: monedero asociado (sólo para acumulativas o mixtas)
 }
 
+type DraftWalletTransaction = {
+  wallet_id: string
+  user_id: string
+  monthly_ingestion_id: string | null
+  amount: number
+  wallet_transaction_type_id: number // Debe venir del mapping de tipos (exceso, sobrante...)
+  description: string | null
+}
+
 // Representa un bien o activo: cuenta bancaria, efectivo, inversión, etc.
 // interface Asset {
 //   id: string
@@ -59,12 +70,12 @@ interface Category {
 // }
 
 // Ingreso puntual en el mes, asociado a un bien/activo
-interface Income {
-  id: string
-  amount: number
-  assetId: string // Debe estar asociado a un bien si amount > 0 (regla crítica)
-  description?: string
-}
+// interface Income {
+//   id: string
+//   amount: number
+//   assetId: string // Debe estar asociado a un bien si amount > 0 (regla crítica)
+//   description?: string
+// }
 
 // Gasto registrado para una categoría (puede incluir walletId si se compensa desde un monedero)
 // interface CategoryExpense {
@@ -129,6 +140,7 @@ export default function IngestaPage() {
   const [isDistributionDialogOpen, setIsDistributionDialogOpen] = useState(false) // Si está abierta la modal de reglas de distribución
   const [errors, setErrors] = useState<{ [key: string]: string }>({}) // Para feedback y validaciones
 
+  
   // ======================
   // PERSISTENCIA TEMPORAL
   // ======================
@@ -271,7 +283,7 @@ export default function IngestaPage() {
 
   const addIncome = () => {
     // Validación: no permitir varios ingresos incompletos (sin bien asociado si amount > 0)
-    const incompleteIncomes = incomes.filter((income) => income.amount > 0 && !income.assetId)
+    const incompleteIncomes = incomes.filter((income) => income.amount > 0 && !income.asset_id)
     if (incompleteIncomes.length > 0) {
       setErrors((prev) => ({
         ...prev,
@@ -284,9 +296,12 @@ export default function IngestaPage() {
     // Crea nuevo ingreso con campos vacíos (cantidad 0, assetId vacío)
     const newIncome: Income = {
       id: Date.now().toString(),
+      user_id: session!.user.id,
+      monthly_ingestion_id: "",
       amount: 0,
-      assetId: "",
+      asset_id: "",
       description: "",
+      created_at: new Date().toISOString(),
     }
     setIncomes([...incomes, newIncome])
     setErrors((prev) => ({ ...prev, incomes: "" }))
@@ -309,12 +324,35 @@ export default function IngestaPage() {
   // ========================
 
   // Actualiza un campo concreto de un gasto por categoría
+  // const updateCategoryExpense = (categoryId: string, field: keyof CategoryExpense, value: any) => {
+  //   setCategoryExpenses((prev) =>
+  //     prev.map((expense) => (expense.category_id === categoryId ? { ...expense, [field]: value } : expense)),
+  //   )
+  // }
   const updateCategoryExpense = (categoryId: string, field: keyof CategoryExpense, value: any) => {
-    setCategoryExpenses((prev) =>
-      prev.map((expense) => (expense.category_id === categoryId ? { ...expense, [field]: value } : expense)),
-    )
-  }
-
+    setCategoryExpenses(prev => {
+      const idx = prev.findIndex(e => e.category_id === categoryId);
+      if (idx === -1) {
+        // crear registro nuevo si no existe
+        const cat = categories.find(c => c.id === categoryId);
+        const newRow: CategoryExpense = {
+          id: '',
+          user_id: session!.user.id,
+          monthly_ingestion_id: '',
+          category_id: categoryId,
+          amount: field === 'amount' ? value : 0,
+          wallet_id: field === 'wallet_id' ? value : (cat?.wallet_id ?? ''),
+          created_at: '',
+        };
+        return [...prev, newRow];
+      }
+      // actualizar existente
+      const copy = [...prev];
+      copy[idx] = { ...copy[idx], [field]: value };
+      return copy;
+    });
+  };
+  
   // ========================
   // CRUD DE REGLAS DE DISTRIBUCIÓN
   // ========================
@@ -567,7 +605,7 @@ export default function IngestaPage() {
 
     // 3. Ingresos con cantidad > 0 DEBEN tener bien asociado
     for (const income of incomes) {
-      if (income.amount > 0 && !income.assetId) {
+      if (income.amount > 0 && !income.asset_id) {
         newErrors.incomes = "Todos los ingresos con cantidad deben tener un bien asociado"
         break
       }
@@ -598,103 +636,229 @@ export default function IngestaPage() {
   // 5. Limpia persistencia temporal
   // 6. Dispara evento global y navega
 
-  const saveIngestion = () => {
+  const saveIngestion = async () => {
     const validationErrors = getValidationErrors()
     if (Object.keys(validationErrors).length > 0) {
       setErrors(validationErrors)
       return
     }
 
-    // Adaptación a formato legacy de ingestas para compatibilidad
-    const expenses: { [categoryId: string]: number } = {}
-    const walletAdjustments: { [categoryId: string]: string } = {}
+    try {
+      // Adaptación a formato legacy de ingestas para compatibilidad
+      const expenses: { [categoryId: string]: number } = {}
+      const walletAdjustments: { [categoryId: string]: string } = {}
 
-    categoryExpenses.forEach((expense) => {
-      expenses[expense.category_id] = expense.amount
-      if (expense.wallet_id) {
-        walletAdjustments[expense.category_id] = expense.wallet_id
+      categoryExpenses.forEach((expense) => {
+        expenses[expense.category_id] = expense.amount
+        if (expense.wallet_id) {
+          walletAdjustments[expense.category_id] = expense.wallet_id
+        }
+      })
+      
+      // Guarda la ingesta en Supabase
+      const { data, error } = await saveMonthlyIngestion({
+        user_id: session!.user.id,
+        month,
+        year,
+      })
+
+      if (error) {
+        console.error('Error saving ingestion:', error)
+        alert(`Error al guardar la ingesta: ${error}`)
+        return
       }
-    })
 
-    // Estructura completa de la ingesta mensual
-    const ingestionData = {
-      id: `${year}-${month}`,
-      month,
-      year,
-      date: `${year}-${String(month).padStart(2, "0")}-01`,
-      expenses,
-      incomes,
-      categoryExpenses,
-      walletAdjustments,
-      distributionRules,
+      if (!data) {
+        console.error('No data returned from saveMonthlyIngestion')
+        alert('Error: No se recibieron datos al guardar la ingesta')
+        return
+      }
+
+      // Estructura completa de la ingesta mensual con el ID devuelto por Supabase
+      const ingestionData = {
+        id: data.id, // ID devuelto por Supabase
+        user_id: session!.user.id,
+        month,
+        year,
+        date: `${year}-${String(month).padStart(2, "0")}-01`,
+      }
+
+      // Ahora guarda los ingresos y gastos asociados a esta ingesta
+      // await saveIncomesAndExpenses(data.id)
+
+      // Actualiza saldos de monederos y bienes (según lógica YNAB)
+      await updateBalances(ingestionData)
+
+      // Limpia datos temporales (ya no es necesario)
+      localStorage.removeItem("tempIngestaData")
+
+      // Dispara evento global para que otras pantallas se refresquen
+      window.dispatchEvent(new CustomEvent("ingestaCompleted"))
+
+      alert("Ingesta guardada correctamente")
+      router.push("/") // Vuelve a la pantalla principal
+    } catch (error) {
+      console.error('Error in saveIngestion:', error)
+      alert(`Error inesperado: ${error instanceof Error ? error.message : 'Error desconocido'}`)
     }
-
-    // Guarda la ingesta en localStorage (acumula histórico de ingestas)
-    const savedIngestions = localStorage.getItem("monthlyIngestions")
-    const ingestions = savedIngestions ? JSON.parse(savedIngestions) : []
-
-    ingestions.push(ingestionData)
-    localStorage.setItem("monthlyIngestions", JSON.stringify(ingestions))
-
-    // Actualiza saldos de monederos y bienes (según lógica YNAB)
-    updateBalances(ingestionData)
-
-    // Limpia datos temporales (ya no es necesario)
-    localStorage.removeItem("tempIngestaData")
-
-    // Dispara evento global para que otras pantallas se refresquen
-    window.dispatchEvent(new CustomEvent("ingestaCompleted"))
-
-    alert("Ingesta guardada correctamente")
-    router.push("/") // Vuelve a la pantalla principal
   }
 
   // ==========================
   // ACTUALIZAR SALDOS DE MONEDEROS Y BIENES AL GUARDAR INGESTA
   // ==========================
   // Aplica todos los movimientos calculados, así como la distribución del bote, y suma ingresos a activos
-
-  const updateBalances = (ingestionData: any) => {
+  /**
+   * Actualiza los saldos de monederos y bienes tras una ingesta mensual y registra los movimientos.
+   * @param ingestionData - Objeto con los datos de la ingesta (debería incluir user_id, id de ingesta, etc.)
+   */
+  const updateBalances = async (ingestionData: {
+    user_id: string
+    id?: string // id de la ingesta, si ya lo tienes disponible (importante para trazabilidad)
+    month: number
+    year: number
+    date: string
+  }) => {
     const movements = calculateWalletMovements()
     const totals = calculateTotals()
     const distribution = calculateDistributionFromRules(totals.monthlyPot)
 
-    // 1. Actualizar monederos: aplicar movimientos y distribución del bote
-    const updatedWallets = wallets.map((wallet) => {
-      let balanceChange = 0
+    // Agrupa los cambios netos por monedero (excesos, sobrantes, distribución)
+    const walletBalanceChanges: { [walletId: string]: number } = {}
 
-      // Movimientos específicos de categorías (excesos/sobrantes)
-      movements.forEach((movement) => {
-        if (movement.walletId === wallet.id) {
-          balanceChange += movement.amount
+    // 1. Suma movimientos (excesos/sobrantes)
+    movements.forEach((movement) => {
+      if (!walletBalanceChanges[movement.walletId]) {
+        walletBalanceChanges[movement.walletId] = 0
+      }
+      walletBalanceChanges[movement.walletId] += movement.amount
+    })
+
+    // 2. Añade la parte de la distribución del bote
+    Object.entries(distribution).forEach(([walletId, amount]) => {
+      if (!walletBalanceChanges[walletId]) {
+        walletBalanceChanges[walletId] = 0
+      }
+      walletBalanceChanges[walletId] += amount
+    })
+
+    // 3. Actualiza monederos y registra movimientos
+    await Promise.all(
+      wallets.map(async (wallet) => {
+        const change = walletBalanceChanges[wallet.id] || 0
+        if (change !== 0) {
+          // 3.1 Actualiza saldo del monedero en Supabase
+          await updateWallet(wallet.id, {
+            current_balance: wallet.current_balance + change,
+          })
+
+          // 3.2 Registra los movimientos individuales (exceso/sobrante/distribución)
+          // Primero los movimientos por exceso/sobrante
+          movements
+            .filter((m) => m.walletId === wallet.id)
+            .forEach(async (m) => {
+              // Ajusta el tipo según tu mapping real en la tabla
+              let wallet_transaction_type_id = 1 // Por ejemplo: 1 = exceso, 2 = sobrante/acumulativo
+              if (m.type === "excess") wallet_transaction_type_id = 1
+              if (m.type === "accumulative") wallet_transaction_type_id = 2
+
+              await createWalletTransaction({
+                user_id: ingestionData.user_id,
+                wallet_id: wallet.id,
+                monthly_ingestion_id: ingestionData.id || null,
+                amount: m.amount,
+                wallet_transaction_type_id,
+                description: m.description,
+              })
+            })
+
+          // Luego el movimiento por distribución del bote, si existe
+          const distAmount = distribution[wallet.id] || 0
+          if (distAmount !== 0) {
+            // Usa un tipo específico para "aporte del bote mensual", ej. 3
+            await createWalletTransaction({
+              user_id: ingestionData.user_id,
+              wallet_id: wallet.id,
+              monthly_ingestion_id: ingestionData.id || null,
+              amount: distAmount,
+              wallet_transaction_type_id: 3, // Ajusta según tus tipos TODO: Pillar los tipos de la base de datos (no se si lo necesito)
+              description: "Aporte del bote mensual",
+            })
+          }
         }
       })
+    )
 
-      // Sumar la parte del bote que le toca por distribución
-      const distributionAmount = distribution[wallet.id] || 0
-      balanceChange += distributionAmount
+    // 4. Actualiza bienes (assets) y registra movimientos
+    await Promise.all(
+      assets.map(async (asset) => {
+        // Busca ingresos del mes para este bien
+        const assetIncomes = incomes.filter((income) => income.asset_id === asset.id)
+        const totalIncome = assetIncomes.reduce((sum, income) => sum + income.amount, 0)
+        if (totalIncome !== 0) {
+          // 4.1 Actualiza saldo del bien en Supabase
+          await updateAsset(asset.id, {
+            current_balance: asset.current_balance + totalIncome,
+          })
 
-      return {
-        ...wallet,
-        currentBalance: wallet.current_balance + balanceChange,
-      }
-    })
-
-    // 2. Actualizar bienes (assets): sumar ingresos del mes
-    const updatedAssets = assets.map((asset) => {
-      const assetIncomes = incomes.filter((income) => income.assetId === asset.id)
-      const totalIncome = assetIncomes.reduce((sum, income) => sum + income.amount, 0)
-
-      return {
-        ...asset,
-        currentBalance: asset.current_balance + totalIncome,
-      }
-    })
-
-    // Guarda los nuevos saldos
-    localStorage.setItem("wallets", JSON.stringify(updatedWallets)) //SUPABASE
-    localStorage.setItem("assets", JSON.stringify(updatedAssets)) //SUPABASE
+          // 4.2 Registra los movimientos individuales (uno por ingreso)
+          for (const income of assetIncomes) {
+            await createAssetTransaction({
+              user_id: ingestionData.user_id,
+              asset_id: asset.id,
+              monthly_ingestion_id: ingestionData.id || null,
+              amount: income.amount,
+              asset_transaction_type_id: 1, // Ejemplo: 1 = ingreso, ajusta según tus tipos reales
+              description: income.description || "Ingreso mensual",
+            })
+          }
+        }
+      })
+    )
   }
+
+
+
+  // const updateBalances = (ingestionData: any) => {
+  //   const movements = calculateWalletMovements()
+  //   const totals = calculateTotals()
+  //   const distribution = calculateDistributionFromRules(totals.monthlyPot)
+
+  //   // 1. Actualizar monederos: aplicar movimientos y distribución del bote
+  //   const updatedWallets = wallets.map((wallet) => {
+  //     let balanceChange = 0
+
+  //     // Movimientos específicos de categorías (excesos/sobrantes)
+  //     movements.forEach((movement) => {
+  //       if (movement.walletId === wallet.id) {
+  //         balanceChange += movement.amount
+  //       }
+  //     })
+
+  //     // Sumar la parte del bote que le toca por distribución
+  //     const distributionAmount = distribution[wallet.id] || 0
+  //     balanceChange += distributionAmount
+
+  //     return {
+  //       ...wallet,
+  //       currentBalance: wallet.current_balance + balanceChange,
+  //     }
+  //   })
+
+  //   // 2. Actualizar bienes (assets): sumar ingresos del mes
+  //   const updatedAssets = assets.map((asset) => {
+  //     const assetIncomes = incomes.filter((income) => income.assetId === asset.id)
+  //     const totalIncome = assetIncomes.reduce((sum, income) => sum + income.amount, 0)
+
+  //     return {
+  //       ...asset,
+  //       currentBalance: asset.current_balance + totalIncome,
+  //     }
+  //   })
+
+  //   // Guarda los nuevos saldos
+  //   localStorage.setItem("wallets", JSON.stringify(updatedWallets)) //SUPABASE
+  //   localStorage.setItem("assets", JSON.stringify(updatedAssets)) //SUPABASE
+  // }
 
   // ==========================
   // CÁLCULOS AUXILIARES PARA MOSTRAR EN UI
@@ -709,7 +873,6 @@ export default function IngestaPage() {
   // RENDER DE LA INTERFAZ
   // ==========================
   // ¡Esta parte se apoya intensamente en el sistema de componentes shadcn/ui!
-
   return (
     <div className="container mx-auto p-6 space-y-6">
       {/* Encabezado de la pantalla */}
@@ -818,13 +981,19 @@ export default function IngestaPage() {
                   <div>
                     <Label>Gasto realizado</Label>
                     <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={spent}
-                      onChange={(e) =>
-                        updateCategoryExpense(category.id, "amount", Number.parseFloat(e.target.value) || 0)
-                      }
+                      type="text"
+                      value={spent === 0 ? "" : spent.toString()}
+                      onChange={(e) => {
+                        const inputValue = e.target.value
+                        if (inputValue === "") {
+                          updateCategoryExpense(category.id, "amount", 0)
+                        } else {
+                          const numericValue = parseFloat(inputValue)
+                          if (!isNaN(numericValue) && numericValue >= 0) {
+                            updateCategoryExpense(category.id, "amount", numericValue)
+                          }
+                        }
+                      }}
                       placeholder="0.00"
                     />
                   </div>
@@ -926,7 +1095,7 @@ export default function IngestaPage() {
               </div>
               <div className="flex-1">
                 <Label>Bien asociado</Label>
-                <Select value={income.assetId} onValueChange={(value) => updateIncome(income.id, "assetId", value)}>
+                <Select value={income.asset_id} onValueChange={(value) => updateIncome(income.id, "asset_id", value)}>
                   <SelectTrigger>
                     <SelectValue placeholder="Seleccionar bien" />
                   </SelectTrigger>

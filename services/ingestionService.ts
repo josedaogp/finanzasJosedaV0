@@ -8,108 +8,105 @@ interface DistributionRule {
   priority: number
 }
 
-export async function saveDistributionRules(
-  rules: DistributionRule[],
-  userId: string
-) {
-  // Primero borra todas las reglas previas del usuario (puedes filtrar por mes si procede)
-  const { error: deleteError } = await supabase
-    .from("distribution_rules")
-    .delete()
-    .eq("user_id", userId)
-    // .eq("month", ...) si es por mes
-    // .eq("year", ...) si es por mes
+// export async function saveDistributionRules(
+//   rules: DistributionRule[],
+//   userId: string
+// ) {
+//   // Primero borra todas las reglas previas del usuario (puedes filtrar por mes si procede)
+//   const { error: deleteError } = await supabase
+//     .from("distribution_rules")
+//     .delete()
+//     .eq("user_id", userId)
+//     // .eq("month", ...) si es por mes
+//     // .eq("year", ...) si es por mes
 
-  if (deleteError) {
-    return { error: deleteError.message }
-  }
+//   if (deleteError) {
+//     return { error: deleteError.message }
+//   }
 
-  // Inserta todas las reglas nuevas
-  const toInsert = rules.map(r => ({
-    user_id: userId,
-    wallet_id: r.walletId,
-    type: r.type,
-    value: r.value,
-    priority: r.priority,
-    // month, year, ... si hace falta
-  }))
+//   // Inserta todas las reglas nuevas
+//   const toInsert = rules.map(r => ({
+//     user_id: userId,
+//     wallet_id: r.walletId,
+//     type: r.type,
+//     value: r.value,
+//     priority: r.priority,
+//     // month, year, ... si hace falta
+//   }))
 
-  const { data, error } = await supabase
-    .from("distribution_rules")
-    .insert(toInsert)
+//   const { data, error } = await supabase
+//     .from("distribution_rules")
+//     .insert(toInsert)
 
-  if (error) return { error: error.message }
+//   if (error) return { error: error.message }
 
-  return { data }
+//   return { data }
+// }
+// interface SaveMonthlyIngestionParams {
+//   month: number
+//   year: number
+//   categoryExpenses: CategoryExpense[]
+//   incomes: Income[]
+//   distributionRules?: DistributionRule[]
+//   userId?: string // opcional, si usas autenticación
+// }
+
+type MonthlyIngestionParams = {
+  user_id: string // UUID del usuario (obligatorio)
+  month: number   // 1..12
+  year: number    // >= 2000
+  date?: string   // Opcional: por defecto, se calcula
 }
-interface SaveMonthlyIngestionParams {
-  month: number
-  year: number
-  categoryExpenses: CategoryExpense[]
-  incomes: Income[]
-  distributionRules?: DistributionRule[]
-  userId?: string // opcional, si usas autenticación
-}
-
 export async function saveMonthlyIngestion({
+  user_id,
   month,
   year,
-  categoryExpenses,
-  incomes,
-  distributionRules,
-  userId,
-}: SaveMonthlyIngestionParams) {
-  // Calcula un ID único para el mes y usuario
-  const ingestion_id = `${userId ?? "default"}-${year}-${String(month).padStart(2, "0")}`
+  date, // Opcional
+}: MonthlyIngestionParams): Promise<{ data?: any; error?: string }> {
+  try {
+    // Calcula la fecha si no se pasa (primer día del mes)
+    const finalDate =
+      date || `${year}-${String(month).padStart(2, "0")}-01`
 
-  // Prepara el objeto a guardar
-  const newIngestion = {
-    id: ingestion_id,
-    user_id: userId,
-    month,
-    year,
-    category_expenses: categoryExpenses,
-    incomes,
-    distribution_rules: distributionRules ?? [],
-    date: `${year}-${String(month).padStart(2, "0")}-01`,
-    // Añade otros campos según tu modelo
-  }
-
-  // Busca si existe ya la ingesta de ese mes
-  const { data: existing, error: fetchError } = await supabase
-    .from("monthly_ingestions")
-    .select("id")
-    .eq("id", ingestion_id)
-    .single()
-
-  if (fetchError && fetchError.code !== "PGRST116") {
-    // Error distinto de "no rows found"
-    return { error: fetchError.message }
-  }
-
-  let result
-  if (existing) {
-    // Actualiza la existente
-    result = await supabase
+    // Busca si ya existe para evitar duplicados por user/mes/año (UNIQUE en BBDD)
+    const { data: existing, error: fetchError } = await supabase
       .from("monthly_ingestions")
-      .update(newIngestion)
-      .eq("id", ingestion_id)
-      .select()
+      .select("id")
+      .eq("user_id", user_id)
+      .eq("month", month)
+      .eq("year", year)
       .single()
-  } else {
-    // Inserta nueva
-    result = await supabase
-      .from("monthly_ingestions")
-      .insert([newIngestion])
-      .select()
-      .single()
-  }
 
-  if (result.error) {
-    return { error: result.error.message }
-  }
+    if (fetchError && fetchError.code !== "PGRST116") {
+      // "PGRST116" = Not found (ok si es nuevo)
+      return { error: fetchError.message }
+    }
 
-  return { data: result.data }
+    let result
+    if (existing) {
+      // Si ya existe, simplemente devuélvelo (o podrías actualizar, según tu lógica)
+      return { data: existing }
+    } else {
+      // Si no existe, lo insertamos
+      const { data, error } = await supabase
+        .from("monthly_ingestions")
+        .insert([
+          {
+            user_id,
+            month,
+            year,
+            date: finalDate,
+          },
+        ])
+        .select()
+        .single()
+
+      if (error) return { error: error.message }
+      return { data }
+    }
+  } catch (err: any) {
+    return { error: err?.message || "Unknown error" }
+  }
 }
 
 export async function getMonthlyIngestion(year: number, month: number) {
