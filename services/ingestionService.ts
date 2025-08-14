@@ -279,3 +279,38 @@ export async function upsertDistributionRule(rule: Omit<DistributionRule, 'id' |
   if (error) throw new Error(error.message)
   return data as DistributionRule
 }
+
+// Importacion de meses
+// Elimina TODOS los gastos por categoría de una ingesta (idempotente)
+export async function deleteCategoryExpensesByIngestionId(monthly_ingestion_id: string) {
+  const { supabase } = await import("@/lib/supabaseClient")
+  const { data: u, error: authErr } = await supabase.auth.getUser()
+  if (authErr) throw new Error(authErr.message)
+  const userId = u?.user?.id
+  if (!userId) return
+
+  const { error } = await supabase
+    .from("category_expenses")
+    .delete()
+    .eq("user_id", userId)
+    .eq("monthly_ingestion_id", monthly_ingestion_id)
+
+  if (error) throw new Error(error.message)
+}
+
+// Elimina TODOS los ingresos de una ingesta (idempotente)
+export async function deleteIncomesByIngestionId(monthly_ingestion_id: string) {
+  const { supabase } = await import("@/lib/supabaseClient")
+  const { data: u, error: authErr } = await supabase.auth.getUser()
+  if (authErr) throw new Error(authErr.message)
+  const userId = u?.user?.id
+  if (!userId) return
+
+  const { error } = await supabase
+    .from("incomes")
+    .delete()
+    .eq("user_id", userId)
+    .eq("monthly_ingestion_id", monthly_ingestion_id)
+
+  if (error) throw new Error(error.message)
+}
