@@ -109,32 +109,56 @@ export async function saveMonthlyIngestion({
   }
 }
 
-export async function getMonthlyIngestion(year: number, month: number) {
-  const { data: ingestion } = await supabase
+export async function getMonthlyIngestionsIndex(): Promise<{ year: number; month: number }[]> {
+  const { data: u, error: authErr } = await supabase.auth.getUser()
+  if (authErr) throw new Error(authErr.message)
+  const userId = u?.user?.id
+  if (!userId) return []
+
+  const { data, error } = await supabase
     .from("monthly_ingestions")
-    .select("*")
+    .select("year, month")
+    .eq("user_id", userId)
+    .order("year", { ascending: false })
+    .order("month", { ascending: false })
+
+  if (error) throw new Error(error.message)
+  return (data || []) as { year: number; month: number }[]
+}
+
+
+
+export async function getMonthlyIngestion(year: number, month: number) {
+  // Obtiene el user_id vigente (respetando RLS multiusuario)
+  const { data: u, error: authErr } = await supabase.auth.getUser()
+  if (authErr) throw new Error(authErr.message)
+  const userId = u?.user?.id
+  if (!userId) return null
+
+  // Embedding de hijos; el alias "expenses" y "incomes" es solo para comodidad
+  const { data, error } = await supabase
+    .from("monthly_ingestions")
+    .select(`
+      id, user_id, year, month, date,
+      expenses:category_expenses(*),
+      incomes:incomes(*, assets(name))
+    `)
+    .eq("user_id", userId)
     .eq("year", year)
     .eq("month", month)
-    .single()
+    .maybeSingle()
 
-  if (!ingestion) return null
-
-  const { data: expenses } = await supabase
-    .from("category_expenses")
-    .select("*")
-    .eq("monthly_ingestion_id", ingestion.id)
-
-  const { data: incomes } = await supabase
-    .from("incomes")
-    .select("*")
-    .eq("monthly_ingestion_id", ingestion.id)
+  if (error) throw new Error(error.message)
+  if (!data) return null
 
   return {
-    ...ingestion,
-    expenses: expenses || [],
-    incomes: incomes || [],
+    ...data,
+    expenses: Array.isArray((data as any).expenses) ? (data as any).expenses : [],
+    incomes: Array.isArray((data as any).incomes) ? (data as any).incomes : [],
   }
 }
+
+
 
 export async function fetchCategoryExpenses(monthly_ingestion_id: string) {
   const { data, error } = await supabase

@@ -37,6 +37,7 @@ import { getMonthlyIngestion, saveMonthlyIngestion } from "@/services/ingestionS
 import { fetchDistributionRules } from "@/services/distributionRulesService"
 import { createWalletTransaction } from "@/services/walletTransactionService"
 import { createAssetTransaction } from "@/services/assetTransactionService"
+import { supabase } from "@/lib/supabaseClient"
 
 // ===========================
 //    TIPOS Y MODELOS DE DATOS
@@ -625,6 +626,65 @@ export default function IngestaPage() {
 
     return newErrors
   }
+  /**
+   * Reemplaza (delete + bulk insert) los gastos por categoría e ingresos
+   * para una cabecera de ingesta dada.
+   */
+  const saveIncomesAndExpenses = async (ingestionId: string) => {
+    const userId = session!.user.id
+
+    // 1) Normalizar y filtrar datos válidos
+    const expensesRows = categoryExpenses.map((e) => ({
+      user_id: userId,
+      monthly_ingestion_id: ingestionId,
+      category_id: e.category_id,
+      amount: Number(e.amount) || 0,
+      wallet_id: e.wallet_id || null,
+    }))
+
+    // Reglas típicas:
+    // - Puedes guardar todas las categorías (aunque amount sea 0) -> histórico completo
+    //   o si prefieres: .filter(r => r.amount > 0)
+    const finalExpenses = expensesRows // .filter(r => r.amount > 0)
+
+    const incomesRows = incomes
+      .filter((i) => (Number(i.amount) || 0) > 0) // solo ingresos con cantidad
+      .map((i) => ({
+        user_id: userId,
+        monthly_ingestion_id: ingestionId,
+        amount: Number(i.amount) || 0,
+        asset_id: i.asset_id,                 // obligatorio en tu esquema
+        description: i.description || null,
+      }))
+
+    // 2) Borrar existentes de ese mes (idempotente y simple)
+    const delExp = await supabase
+      .from("category_expenses")
+      .delete()
+      .eq("user_id", userId)
+      .eq("monthly_ingestion_id", ingestionId)
+
+    if (delExp.error) throw new Error(`Error limpiando gastos: ${delExp.error.message}`)
+
+    const delInc = await supabase
+      .from("incomes")
+      .delete()
+      .eq("user_id", userId)
+      .eq("monthly_ingestion_id", ingestionId)
+
+    if (delInc.error) throw new Error(`Error limpiando ingresos: ${delInc.error.message}`)
+
+    // 3) Insertar nuevos (en bloque)
+    if (finalExpenses.length) {
+      const insExp = await supabase.from("category_expenses").insert(finalExpenses)
+      if (insExp.error) throw new Error(`Error insertando gastos: ${insExp.error.message}`)
+    }
+
+    if (incomesRows.length) {
+      const insInc = await supabase.from("incomes").insert(incomesRows)
+      if (insInc.error) throw new Error(`Error insertando ingresos: ${insInc.error.message}`)
+    }
+  }
 
   // ==========================
   // GUARDAR INGESTA COMPLETA
@@ -644,17 +704,6 @@ export default function IngestaPage() {
     }
 
     try {
-      // Adaptación a formato legacy de ingestas para compatibilidad
-      const expenses: { [categoryId: string]: number } = {}
-      const walletAdjustments: { [categoryId: string]: string } = {}
-
-      categoryExpenses.forEach((expense) => {
-        expenses[expense.category_id] = expense.amount
-        if (expense.wallet_id) {
-          walletAdjustments[expense.category_id] = expense.wallet_id
-        }
-      })
-      
       // Guarda la ingesta en Supabase
       const { data, error } = await saveMonthlyIngestion({
         user_id: session!.user.id,
@@ -667,36 +716,83 @@ export default function IngestaPage() {
         alert(`Error al guardar la ingesta: ${error}`)
         return
       }
-
       if (!data) {
         console.error('No data returned from saveMonthlyIngestion')
         alert('Error: No se recibieron datos al guardar la ingesta')
         return
       }
 
-      // Estructura completa de la ingesta mensual con el ID devuelto por Supabase
-      const ingestionData = {
-        id: data.id, // ID devuelto por Supabase
+      // 1) Persistir gastos e ingresos del estado para esta cabecera
+      await saveIncomesAndExpenses(data.id)
+
+      // 2) Actualizar saldos y registrar transacciones derivadas
+      await updateBalances({
+        id: data.id,
         user_id: session!.user.id,
         month,
         year,
         date: `${year}-${String(month).padStart(2, "0")}-01`,
-      }
+      })
 
-      // Ahora guarda los ingresos y gastos asociados a esta ingesta
-      // await saveIncomesAndExpenses(data.id)
-
-      // Actualiza saldos de monederos y bienes (según lógica YNAB)
-      await updateBalances(ingestionData)
-
-      // Limpia datos temporales (ya no es necesario)
+      // 3) Limpieza + navegación
       localStorage.removeItem("tempIngestaData")
-
-      // Dispara evento global para que otras pantallas se refresquen
       window.dispatchEvent(new CustomEvent("ingestaCompleted"))
-
       alert("Ingesta guardada correctamente")
-      router.push("/") // Vuelve a la pantalla principal
+      router.push("/")
+
+      // Adaptación a formato legacy de ingestas para compatibilidad
+      // const expenses: { [categoryId: string]: number } = {}
+      // const walletAdjustments: { [categoryId: string]: string } = {}
+
+      // categoryExpenses.forEach((expense) => {
+      //   expenses[expense.category_id] = expense.amount
+      //   if (expense.wallet_id) {
+      //     walletAdjustments[expense.category_id] = expense.wallet_id
+      //   }
+      // })
+      
+      // // Guarda la ingesta en Supabase
+      // const { data, error } = await saveMonthlyIngestion({
+      //   user_id: session!.user.id,
+      //   month,
+      //   year,
+      // })
+
+      // if (error) {
+      //   console.error('Error saving ingestion:', error)
+      //   alert(`Error al guardar la ingesta: ${error}`)
+      //   return
+      // }
+
+      // if (!data) {
+      //   console.error('No data returned from saveMonthlyIngestion')
+      //   alert('Error: No se recibieron datos al guardar la ingesta')
+      //   return
+      // }
+
+      // // Estructura completa de la ingesta mensual con el ID devuelto por Supabase
+      // const ingestionData = {
+      //   id: data.id, // ID devuelto por Supabase
+      //   user_id: session!.user.id,
+      //   month,
+      //   year,
+      //   date: `${year}-${String(month).padStart(2, "0")}-01`,
+      // }
+
+      // // Ahora guarda los ingresos y gastos asociados a esta ingesta
+      // // await saveIncomesAndExpenses(data.id)
+
+      // // Actualiza saldos de monederos y bienes (según lógica YNAB)
+      // await updateBalances(ingestionData)
+
+      // // Limpia datos temporales (ya no es necesario)
+      // localStorage.removeItem("tempIngestaData")
+
+      // // Dispara evento global para que otras pantallas se refresquen
+      // window.dispatchEvent(new CustomEvent("ingestaCompleted"))
+
+      // alert("Ingesta guardada correctamente")
+      // router.push("/") // Vuelve a la pantalla principal
     } catch (error) {
       console.error('Error in saveIngestion:', error)
       alert(`Error inesperado: ${error instanceof Error ? error.message : 'Error desconocido'}`)

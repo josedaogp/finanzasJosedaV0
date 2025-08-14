@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -8,53 +8,40 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { Calendar, TrendingUp, TrendingDown, ArrowRight, Filter, Eye } from "lucide-react"
+import { Calendar, TrendingUp, TrendingDown, ArrowRight, Filter, Eye, Building2 } from "lucide-react"
 import Link from "next/link"
 
-interface Wallet {
+import { useRequireAuth } from "@/hooks/useRequireAuth"
+import { fetchWallets } from "@/services/walletService"
+import { getMonthlyIngestion, getMonthlyIngestionsIndex } from "@/services/ingestionService"
+import { fetchWalletTransactionsByIngestionIds } from "@/services/walletTransactionService"
+import { EnrichedMonthlyIngestion } from "@/types/models"
+
+type Wallet = {
   id: string
   name: string
-  currentBalance: number
-  targetBalance?: number
+  current_balance: number
+  target_balance?: number | null
 }
 
-interface MonthlyIngestion {
+type WalletTransaction = {
   id: string
+  user_id: string
+  wallet_id: string
+  monthly_ingestion_id: string | null
+  amount: number
+  created_at: string
+}
+
+type MonthlySnapshot = {
   month: number
   year: number
-  date: string
-  expenses: { [categoryId: string]: number }
-  incomes: Array<{
-    id: string
-    amount: number
-    assetId: string
-    description?: string
-  }>
-  categoryExpenses?: Array<{
-    categoryId: string
-    amount: number
-    walletId?: string
-  }>
-  walletAdjustments: { [walletId: string]: string }
-  surplusDistribution: { [walletId: string]: number }
-}
-
-interface Category {
-  id: string
-  name: string
-  type: "gasto" | "gasto_acumulativo" | "gasto_mixto" | "gasto_acumulativo_opcional"
-  monthlyBudget: number
-}
-
-interface MonthlySnapshot {
-  month: number
-  year: number
-  date: string
+  date: string // "YYYY-MM"
   wallets: Array<{
     id: string
     name: string
     balance: number
-    targetBalance?: number
+    targetBalance?: number | null
     change: number
     changePercentage: number
   }>
@@ -64,192 +51,228 @@ interface MonthlySnapshot {
 }
 
 export default function EvolucionPage() {
-  const [wallets, setWallets] = useState<Wallet[]>([])
-  const [monthlyData, setMonthlyData] = useState<MonthlyIngestion[]>([])
-  const [categories, setCategories] = useState<Category[]>([])
-  const [snapshots, setSnapshots] = useState<MonthlySnapshot[]>([])
-  const [selectedWallet, setSelectedWallet] = useState<string>("all")
-  const [startDate, setStartDate] = useState<string>("")
-  const [endDate, setEndDate] = useState<string>("")
+  const session = useRequireAuth()
+  if (!session) return null
 
+  // Datos base
+  const [wallets, setWallets] = useState<Wallet[]>([])
+  const [availableMonths, setAvailableMonths] = useState<{ year: number; month: number }[]>([])
+
+  // Filtros UI
+  const [selectedWallet, setSelectedWallet] = useState<string>("all")
+  const [startDate, setStartDate] = useState<string>("") // "YYYY-MM"
+  const [endDate, setEndDate] = useState<string>("")     // "YYYY-MM"
+
+  // Datos cargados
+  const [monthsInRange, setMonthsInRange] = useState<Array<{ year: number; month: number; ingestionId: string }>>([])
+  const [transactions, setTransactions] = useState<WalletTransaction[]>([])
+  const [snapshots, setSnapshots] = useState<MonthlySnapshot[]>([])
+
+  // Loading / error
+  const [loadingIndex, setLoadingIndex] = useState<boolean>(true)
+  const [loadingData, setLoadingData] = useState<boolean>(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // 1) Cargar wallets + índice de ingestas; preparar rango por defecto (últimos 6 meses disponibles)
   useEffect(() => {
-    loadData()
+    const loadBasics = async () => {
+      try {
+        setLoadingIndex(true)
+        setError(null)
+
+        const [ws, idx] = await Promise.all([fetchWallets(), getMonthlyIngestionsIndex()])
+
+        const mappedWallets: Wallet[] = (ws || []).map((w: any) => ({
+          id: w.id,
+          name: w.name,
+          current_balance: Number(w.current_balance ?? w.currentBalance ?? 0),
+          target_balance: w.target_balance ?? w.targetBalance ?? null,
+        }))
+
+        const sortedIdx = (idx || [])
+          .slice()
+          .sort((a, b) => (b.year - a.year) || (b.month - a.month))
+
+        setWallets(mappedWallets)
+        setAvailableMonths(sortedIdx)
+
+        // Rango por defecto: últimos 6 meses disponibles (o actual si no hay índice)
+        if (sortedIdx.length > 0) {
+          const latest = sortedIdx[0]
+          const latestStr = `${latest.year}-${String(latest.month).padStart(2, "0")}`
+
+          // buscar el sexto más antiguo dentro de los disponibles
+          const upto6 = sortedIdx.slice(0, 6)
+          const oldest = upto6[upto6.length - 1]
+          const oldestStr = `${oldest.year}-${String(oldest.month).padStart(2, "0")}`
+
+          setStartDate(oldestStr)
+          setEndDate(latestStr)
+        } else {
+          const now = new Date()
+          const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1)
+          setStartDate(`${sixMonthsAgo.getFullYear()}-${String(sixMonthsAgo.getMonth() + 1).padStart(2, "0")}`)
+          setEndDate(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`)
+        }
+      } catch (e: any) {
+        setError(e?.message ?? "Error cargando datos iniciales.")
+      } finally {
+        setLoadingIndex(false)
+      }
+    }
+
+    loadBasics()
   }, [])
 
+  // 2) Cargar meses del rango (IDs de ingesta) + transacciones vinculadas
   useEffect(() => {
-    if (wallets.length > 0 && monthlyData.length > 0) {
-      calculateSnapshots()
-    }
-  }, [wallets, monthlyData, categories])
+    const loadRange = async () => {
+      if (!startDate || !endDate) {
+        setMonthsInRange([])
+        setTransactions([])
+        setSnapshots([])
+        return
+      }
 
-  const loadData = () => {
-    const savedWallets = localStorage.getItem("wallets")
-    const savedMonthlyData = localStorage.getItem("monthlyIngestions")
-    const savedCategories = localStorage.getItem("categories")
+      try {
+        setLoadingData(true)
+        setError(null)
 
-    if (savedWallets) {
-      setWallets(JSON.parse(savedWallets))
-    }
-    if (savedMonthlyData) {
-      setMonthlyData(JSON.parse(savedMonthlyData))
-    }
-    if (savedCategories) {
-      setCategories(JSON.parse(savedCategories))
-    }
+        // filtrar índice por rango de meses (inclusive)
+        const months = availableMonths
+          .filter((m) => toKey(m.year, m.month) >= startDate && toKey(m.year, m.month) <= endDate)
+          .slice() // copia
+          .sort((a, b) => (a.year - b.year) || (a.month - b.month)) // asc para acumulados
 
-    // Establecer fechas por defecto (últimos 6 meses)
-    const now = new Date()
-    const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1)
-    setStartDate(`${sixMonthsAgo.getFullYear()}-${String(sixMonthsAgo.getMonth() + 1).padStart(2, "0")}`)
-    setEndDate(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`)
-  }
-
-  const calculateSnapshots = () => {
-    const snapshots: MonthlySnapshot[] = []
-
-    // Ordenar datos por fecha
-    const sortedData = [...monthlyData].sort((a, b) => {
-      const dateA = new Date(a.year, a.month - 1)
-      const dateB = new Date(b.year, b.month - 1)
-      return dateA.getTime() - dateB.getTime()
-    })
-
-    // Simular saldos iniciales (en una implementación real, esto vendría de la base de datos)
-    const walletBalances: { [walletId: string]: number } = {}
-    const previousBalances: { [walletId: string]: number } = {}
-
-    wallets.forEach((wallet) => {
-      walletBalances[wallet.id] = 0 // Empezar desde 0 para la simulación
-      previousBalances[wallet.id] = 0
-    })
-
-    sortedData.forEach((ingestion, index) => {
-      // Guardar saldos anteriores
-      Object.keys(walletBalances).forEach((walletId) => {
-        previousBalances[walletId] = walletBalances[walletId]
-      })
-
-      const totalIncome = ingestion.incomes.reduce((sum, income) => sum + income.amount, 0)
-      const totalExpenses = Object.values(ingestion.expenses).reduce((sum, amount) => sum + amount, 0)
-      const monthlyPot = totalIncome - totalExpenses
-
-      wallets.forEach((wallet) => {
-        let excesses = 0
-        let surpluses = 0
-        let monthlyPotShare = 0
-
-        // Calcular excesos cubiertos por este monedero
-        Object.entries(ingestion.walletAdjustments || {}).forEach(([categoryId, walletId]) => {
-          if (walletId === wallet.id) {
-            const expense = ingestion.expenses[categoryId] || 0
-            const category = categories.find((cat) => cat.id === categoryId)
-            if (category) {
-              const excess = Math.max(0, expense - category.monthlyBudget)
-              excesses -= excess
-            }
+        // obtener IDs de ingesta para esos meses
+        const withIds: Array<{ year: number; month: number; ingestionId: string }> = []
+        for (const m of months) {
+          const mi = await getMonthlyIngestion(m.year, m.month)
+          if (mi?.id) {
+            withIds.push({ year: m.year, month: m.month, ingestionId: mi.id })
           }
-        })
-
-        // Calcular sobrantes de categorías acumulativas
-        if (ingestion.categoryExpenses) {
-          ingestion.categoryExpenses.forEach((categoryExpense) => {
-            if (categoryExpense.walletId === wallet.id) {
-              const category = categories.find((cat) => cat.id === categoryExpense.categoryId)
-              if (
-                category &&
-                (category.type === "gasto_acumulativo" ||
-                  category.type === "gasto_mixto" ||
-                  category.type === "gasto_acumulativo_opcional")
-              ) {
-                const surplus = Math.max(0, category.monthlyBudget - categoryExpense.amount)
-                surpluses += surplus
-              }
-            }
-          })
         }
 
-        // Calcular distribución del bote mensual
-        const distributionPercentage = ingestion.surplusDistribution[wallet.id] || 0
-        if (monthlyPot > 0) {
-          monthlyPotShare = (monthlyPot * distributionPercentage) / 100
+        setMonthsInRange(withIds)
+
+        // Si no hay ingestas, vaciar
+        if (withIds.length === 0) {
+          setTransactions([])
+          setSnapshots([])
+          return
         }
 
-        const totalMovement = excesses + surpluses + monthlyPotShare
-        walletBalances[wallet.id] += totalMovement
-      })
+        // Traer transacciones de monedero asociadas a esas ingestas
+        const tx = await fetchWalletTransactionsByIngestionIds(withIds.map((x) => x.ingestionId))
+        // normalizar amounts a número
+        const norm = (tx || []).map((t: any) => ({
+          ...t,
+          amount: Number(t.amount) || 0,
+        })) as WalletTransaction[]
 
-      // Crear snapshot del mes
-      const walletSnapshots = wallets.map((wallet) => {
-        const currentBalance = walletBalances[wallet.id]
-        const previousBalance = previousBalances[wallet.id]
-        const change = currentBalance - previousBalance
-        const changePercentage = previousBalance !== 0 ? (change / Math.abs(previousBalance)) * 100 : 0
+        setTransactions(norm)
+      } catch (e: any) {
+        setError(e?.message ?? "Error cargando evolución.")
+        setTransactions([])
+        setSnapshots([])
+      } finally {
+        setLoadingData(false)
+      }
+    }
+
+    loadRange()
+  }, [startDate, endDate, availableMonths])
+
+  // 3) Construir snapshots mensuales a partir de transacciones
+  useEffect(() => {
+    if (monthsInRange.length === 0) {
+      setSnapshots([])
+      return
+    }
+
+    // Mapas acumulados por wallet
+    const runningBalance: Record<string, number> = {}
+    const lastBalance: Record<string, number> = {}
+
+    wallets.forEach((w) => {
+      runningBalance[w.id] = 0 // partimos de 0, como hacía tu versión localStorage
+      lastBalance[w.id] = 0
+    })
+
+    const snaps: MonthlySnapshot[] = []
+
+    for (const m of monthsInRange) {
+      // cambio del mes por wallet
+      const changesByWallet: Record<string, number> = {}
+      wallets.forEach((w) => (changesByWallet[w.id] = 0))
+
+      // sumar transacciones del mes actual (por ingestionId)
+      const monthTx = transactions.filter((t) => t.monthly_ingestion_id === m.ingestionId)
+      for (const tx of monthTx) {
+        if (changesByWallet[tx.wallet_id] === undefined) changesByWallet[tx.wallet_id] = 0
+        changesByWallet[tx.wallet_id] += Number(tx.amount) || 0
+      }
+
+      // aplicar cambios y calcular snapshot por wallet
+      const walletRows = wallets.map((w) => {
+        const prev = lastBalance[w.id]
+        const change = changesByWallet[w.id] || 0
+        runningBalance[w.id] = prev + change
+        lastBalance[w.id] = runningBalance[w.id]
+
+        const changePercentage = prev !== 0 ? (change / Math.abs(prev)) * 100 : (change === 0 ? 0 : 100)
 
         return {
-          id: wallet.id,
-          name: wallet.name,
-          balance: currentBalance,
-          targetBalance: wallet.targetBalance,
+          id: w.id,
+          name: w.name,
+          balance: runningBalance[w.id],
+          targetBalance: w.target_balance ?? null,
           change,
           changePercentage,
         }
       })
 
-      const totalBalance = walletSnapshots.reduce((sum, w) => sum + w.balance, 0)
-      const totalChange = walletSnapshots.reduce((sum, w) => sum + w.change, 0)
+      const totalBalance = walletRows.reduce((s, r) => s + r.balance, 0)
+      const totalChange = walletRows.reduce((s, r) => s + r.change, 0)
 
-      snapshots.push({
-        month: ingestion.month,
-        year: ingestion.year,
-        date: `${ingestion.year}-${String(ingestion.month).padStart(2, "0")}`,
-        wallets: walletSnapshots,
+      snaps.push({
+        month: m.month,
+        year: m.year,
+        date: toKey(m.year, m.month),
+        wallets: walletRows,
         totalBalance,
         totalChange,
-        ingestionId: ingestion.id,
-      })
-    })
-
-    setSnapshots(snapshots)
-  }
-
-  const getFilteredSnapshots = () => {
-    let filtered = snapshots
-
-    // Filtrar por fechas
-    if (startDate && endDate) {
-      filtered = filtered.filter((snapshot) => {
-        const snapshotDate = snapshot.date
-        return snapshotDate >= startDate && snapshotDate <= endDate
+        ingestionId: m.ingestionId,
       })
     }
 
-    return filtered.sort((a, b) => {
-      const dateA = new Date(a.year, a.month - 1)
-      const dateB = new Date(b.year, b.month - 1)
-      return dateB.getTime() - dateA.getTime() // Más reciente primero
-    })
-  }
+    setSnapshots(snaps)
+  }, [monthsInRange, transactions, wallets])
 
-  const getWalletProgress = (balance: number, target?: number) => {
-    if (!target) return 0
+  // Helpers
+  const filteredSnapshots = useMemo(() => {
+    let list = snapshots
+    if (startDate && endDate) {
+      list = list.filter((s) => s.date >= startDate && s.date <= endDate)
+    }
+    // orden: más reciente primero
+    return list.slice().sort((a, b) => (b.year - a.year) || (b.month - a.month))
+  }, [snapshots, startDate, endDate])
+
+  const getWalletProgress = (balance: number, target?: number | null) => {
+    if (!target || target <= 0) return 0
     return Math.min((balance / target) * 100, 100)
   }
 
-  const formatMonthYear = (month: number, year: number) => {
-    return new Date(year, month - 1).toLocaleDateString("es-ES", {
-      month: "long",
-      year: "numeric",
-    })
-  }
-
-  const filteredSnapshots = getFilteredSnapshots()
+  const formatMonthYear = (month: number, year: number) =>
+    new Date(year, month - 1).toLocaleDateString("es-ES", { month: "long", year: "numeric" })
 
   return (
     <div className="container mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Evolución de Monederos</h1>
-          <p className="text-muted-foreground">Capturas mensuales del estado de tus monederos</p>
+          <p className="text-muted-foreground">Cambios mensuales según tus ingestas</p>
         </div>
         <Link href="/configuracion">
           <Button variant="outline">Configurar Distribución</Button>
@@ -263,23 +286,38 @@ export default function EvolucionPage() {
             <Filter className="h-5 w-5" />
             Filtros
           </CardTitle>
+          <CardDescription>
+            El rango se basa en los meses con <em>ingestas</em> existentes.
+          </CardDescription>
         </CardHeader>
         <CardContent className="flex gap-4 flex-wrap">
           <div className="space-y-2">
             <Label>Desde</Label>
-            <Input type="month" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-48" />
+            <Input
+              type="month"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="w-48"
+              disabled={loadingIndex || loadingData}
+            />
           </div>
 
           <div className="space-y-2">
             <Label>Hasta</Label>
-            <Input type="month" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-48" />
+            <Input
+              type="month"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-48"
+              disabled={loadingIndex || loadingData}
+            />
           </div>
 
           <div className="space-y-2">
             <Label>Monedero</Label>
-            <Select value={selectedWallet} onValueChange={setSelectedWallet}>
-              <SelectTrigger className="w-48">
-                <SelectValue />
+            <Select value={selectedWallet} onValueChange={setSelectedWallet} disabled={loadingIndex || loadingData}>
+              <SelectTrigger className="w-56">
+                <SelectValue placeholder="Selecciona monedero" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">Todos los monederos</SelectItem>
@@ -295,7 +333,13 @@ export default function EvolucionPage() {
       </Card>
 
       {/* Galería de snapshots mensuales */}
-      {filteredSnapshots.length > 0 ? (
+      {loadingData ? (
+        <Card>
+          <CardContent className="py-8">
+            <p className="text-sm text-muted-foreground">Cargando evolución...</p>
+          </CardContent>
+        </Card>
+      ) : filteredSnapshots.length > 0 ? (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-xl font-semibold">Capturas Mensuales</h2>
@@ -318,7 +362,7 @@ export default function EvolucionPage() {
                       </Link>
                     </div>
                     <CardDescription>
-                      Total: €{snapshot.totalBalance.toFixed(2)}
+                      Total mov.: €{snapshot.totalChange.toFixed(2)}
                       {snapshot.totalChange !== 0 && (
                         <span className={`ml-2 ${snapshot.totalChange >= 0 ? "text-green-600" : "text-red-600"}`}>
                           ({snapshot.totalChange >= 0 ? "+" : ""}€{snapshot.totalChange.toFixed(2)})
@@ -328,47 +372,42 @@ export default function EvolucionPage() {
                   </CardHeader>
                   <CardContent className="space-y-3">
                     {snapshot.wallets
-                      .filter((wallet) => selectedWallet === "all" || wallet.id === selectedWallet)
-                      .map((wallet) => {
-                        const progress = getWalletProgress(wallet.balance, wallet.targetBalance)
-
+                      .filter((w) => selectedWallet === "all" || w.id === selectedWallet)
+                      .map((w) => {
+                        const progress = getWalletProgress(w.balance, w.targetBalance)
                         return (
-                          <div key={wallet.id} className="p-3 border rounded-lg bg-slate-50">
+                          <div key={w.id} className="p-3 border rounded-lg bg-muted">
                             <div className="flex items-center justify-between mb-2">
-                              <span className="font-medium text-sm">{wallet.name}</span>
-                              {wallet.change !== 0 && (
-                                <div
-                                  className={`flex items-center text-xs ${wallet.change >= 0 ? "text-green-600" : "text-red-600"}`}
-                                >
-                                  {wallet.change >= 0 ? (
+                              <span className="font-medium text-sm">{w.name}</span>
+                              {w.change !== 0 && (
+                                <div className={`flex items-center text-xs ${w.change >= 0 ? "text-green-600" : "text-red-600"}`}>
+                                  {w.change >= 0 ? (
                                     <TrendingUp className="h-3 w-3 mr-1" />
                                   ) : (
                                     <TrendingDown className="h-3 w-3 mr-1" />
                                   )}
-                                  {wallet.change >= 0 ? "+" : ""}€{wallet.change.toFixed(2)}
+                                  {w.change >= 0 ? "+" : ""}€{w.change.toFixed(2)}
                                 </div>
                               )}
                             </div>
 
                             <div className="space-y-2">
                               <div className="flex justify-between items-center">
-                                <span className="text-lg font-bold">€{wallet.balance.toFixed(2)}</span>
-                                {wallet.targetBalance && (
-                                  <span className="text-xs text-muted-foreground">
-                                    / €{wallet.targetBalance.toFixed(2)}
-                                  </span>
+                                <span className="text-lg font-bold">€{w.balance.toFixed(2)}</span>
+                                {typeof w.targetBalance === "number" && (
+                                  <span className="text-xs text-muted-foreground">/ €{Number(w.targetBalance).toFixed(2)}</span>
                                 )}
                               </div>
 
-                              {wallet.targetBalance && (
+                              {typeof w.targetBalance === "number" && (
                                 <div className="space-y-1">
                                   <Progress value={progress} className="h-1.5" />
                                   <div className="flex justify-between text-xs text-muted-foreground">
                                     <span>{progress.toFixed(1)}% del objetivo</span>
                                     <span>
-                                      {wallet.balance >= wallet.targetBalance
+                                      {w.balance >= (w.targetBalance || 0)
                                         ? "✅ Completado"
-                                        : `Faltan €${(wallet.targetBalance - wallet.balance).toFixed(2)}`}
+                                        : `Faltan €${((w.targetBalance || 0) - w.balance).toFixed(2)}`}
                                     </span>
                                   </div>
                                 </div>
@@ -387,23 +426,21 @@ export default function EvolucionPage() {
           <Card>
             <CardHeader>
               <CardTitle>Resumen de Tendencias</CardTitle>
-              <CardDescription>Análisis del período seleccionado</CardDescription>
+              <CardDescription>Según los meses del rango seleccionado</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {(() => {
-                  const firstSnapshot = filteredSnapshots[filteredSnapshots.length - 1]
-                  const lastSnapshot = filteredSnapshots[0]
-                  const totalGrowth = lastSnapshot ? lastSnapshot.totalBalance - (firstSnapshot?.totalBalance || 0) : 0
-                  const growthPercentage = firstSnapshot?.totalBalance
-                    ? (totalGrowth / firstSnapshot.totalBalance) * 100
-                    : 0
+                  const first = filteredSnapshots[filteredSnapshots.length - 1]
+                  const last = filteredSnapshots[0]
+                  const totalGrowth = last ? last.totalBalance - (first?.totalBalance || 0) : 0
+                  const growthPercentage = first?.totalBalance ? (totalGrowth / (first.totalBalance || 1)) * 100 : 0
 
                   return (
                     <>
                       <div className="text-center p-4 border rounded-lg">
-                        <div className="text-2xl font-bold">€{lastSnapshot?.totalBalance.toFixed(2) || "0.00"}</div>
-                        <div className="text-sm text-muted-foreground">Balance Actual</div>
+                        <div className="text-2xl font-bold">€{last?.totalBalance.toFixed(2) || "0.00"}</div>
+                        <div className="text-sm text-muted-foreground">Balance Acumulado (simulación)</div>
                       </div>
                       <div className="text-center p-4 border rounded-lg">
                         <div className={`text-2xl font-bold ${totalGrowth >= 0 ? "text-green-600" : "text-red-600"}`}>
@@ -412,11 +449,8 @@ export default function EvolucionPage() {
                         <div className="text-sm text-muted-foreground">Crecimiento Total</div>
                       </div>
                       <div className="text-center p-4 border rounded-lg">
-                        <div
-                          className={`text-2xl font-bold ${growthPercentage >= 0 ? "text-green-600" : "text-red-600"}`}
-                        >
-                          {growthPercentage >= 0 ? "+" : ""}
-                          {growthPercentage.toFixed(1)}%
+                        <div className={`text-2xl font-bold ${growthPercentage >= 0 ? "text-green-600" : "text-red-600"}`}>
+                          {growthPercentage >= 0 ? "+" : ""}{growthPercentage.toFixed(1)}%
                         </div>
                         <div className="text-sm text-muted-foreground">% de Crecimiento</div>
                       </div>
@@ -435,7 +469,7 @@ export default function EvolucionPage() {
             <p className="text-muted-foreground mb-4 text-center">
               {startDate && endDate
                 ? "No hay ingestas en el período seleccionado. Ajusta los filtros o crea nuevas ingestas."
-                : "Realiza algunas ingestas mensuales para ver la evolución de tus monederos"}
+                : "Realiza algunas ingestas mensuales para ver la evolución de tus monederos."}
             </p>
             <Link href="/ingesta">
               <Button>
@@ -448,4 +482,9 @@ export default function EvolucionPage() {
       )}
     </div>
   )
+}
+
+// --- Helpers locales ---
+function toKey(year: number, month: number) {
+  return `${year}-${String(month).padStart(2, "0")}`
 }
